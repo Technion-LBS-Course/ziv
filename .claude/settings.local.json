@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:adip.faa.gov)",
+      "WebSearch",
+      "WebFetch(domain:api.faa.gov)",
+      "WebFetch(domain:www.faa.gov)",
+      "WebFetch(domain:aviationweather.gov)",
+      "WebFetch(domain:adds-faa.opendata.arcgis.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:navaid-api.azurewebsites.net)",
+      "WebFetch(domain:oeaaa.faa.gov)"
+    ]
+  }
+}
