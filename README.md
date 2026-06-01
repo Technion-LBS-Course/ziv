@@ -85,18 +85,21 @@ For validated FAA helipads, the ADIP Airport Master Record provides TLOF/FATO di
 
 ## Formal ML Problem Statement
 
+HIE combines three validation signals — visual (Grounding DINO), textual (LLM search grounding), and structured (ADIP registry). The structured signal is formalised as a supervised binary classifier trained on registry features, described below. XGBoost is the M3 implementation target for this component.
+
 | Element | Detail |
 |---------|--------|
 | **Task** | Binary classification — helipad operational (1) vs. unreliable/decommissioned (0) |
-| **Input X** | Structured registry fields + geospatial enrichment (see Feature List in `../CLAUDE.md`) |
-| **Target y** | `operational` — binary label derived from ADIP status or OPERSTATUS field |
+| **Input X** | Structured registry fields: ownership type, elevation, lighting, source agreement count, data freshness. Geospatial enrichment added in M3 (dist to hospital, city centre, population density) |
+| **Target y** | `operational` — binary label derived from ADIP status (authoritative) or OPERSTATUS field (fallback) |
 | **Loss** | Binary cross-entropy |
-| **Primary metric** | F1-score — **never use accuracy** (class imbalance: most raw records are labeled "active") |
+| **Primary metric** | F1-score — **never accuracy** (class imbalance: most raw records are labeled "active" regardless of true status) |
 | **Split** | 70% train / 15% val / 15% test, stratified by U.S. state + ownership type |
 | **Baseline 1** | Majority-class classifier (predict all operational) |
-| **Baseline 2** | Logistic regression on structured fields only |
-| **Primary model** | XGBoost (M3) |
-| **Comparison model** | Random Forest (M3) |
+| **Baseline 2** | Logistic regression on structured fields only, no geospatial enrichment |
+| **Primary model** | XGBoost with `scale_pos_weight` for class imbalance — M3 |
+| **Comparison model** | Random Forest — M3 |
+| **Goal** | Test F1 > majority-class baseline. Stretch: val F1 ≥ 0.70 |
 
 ---
 
@@ -140,14 +143,9 @@ app.py (Streamlit)
 | Milestone | Date | Status | Key Deliverables |
 |-----------|------|--------|-----------------|
 | M1 | 19 May 2026 | ✅ DONE | Repo, README, Sprint Plan, Pitch |
-| M2 | 02 Jun 2026 | 🔄 IN PROGRESS | Real data in app, 3 EDA charts, baseline F1, density KPI map |
-| M3 | 23 Jun 2026 | ⏳ PENDING | XGBoost model, VLM overlay, OSM enrichment, Streamlit Cloud |
+| M2 | 02 Jun 2026 | ✅ DONE | Real data in app, EDA & HIE tab (3 charts + KPI density map), ADIP enrichment, cross-source matching |
+| M3 | 23 Jun 2026 | ⏳ PENDING | XGBoost classifier, VLM helipad overlay, OSM geospatial enrichment, Streamlit Cloud deployment |
 | Final | 21 Jul 2026 | ⏳ PENDING | Demo Day, stable URL, documented |
-
-**M2 remaining:**
-- [ ] `tests/test_smoke.py`
-- [ ] `notebooks/01_eda.ipynb` (4 charts: class distribution, missing value heatmap, correlation matrix, geographic scatter)
-- [ ] `merge_helipad_sources()` spatial deduplication (currently a simple concat)
 
 ---
 

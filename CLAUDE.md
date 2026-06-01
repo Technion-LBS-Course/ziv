@@ -227,15 +227,13 @@ Every FAA marker popup contains:
 
 ---
 
-## What Is Not Yet Implemented
+## What Is Not Yet Implemented (M3 scope)
 
-| Item | Planned for |
-|------|-------------|
-| `src/model.py` — `build_features()`, `train_model()`, `evaluate_model()` | M3 (23 Jun 2026) |
-| `merge_helipad_sources()` spatial deduplication (currently a simple concat) | M3 |
-| `tests/test_smoke.py` | M2 |
-| `notebooks/01_eda.ipynb` | M2 |
-| ADIP XLSX fetcher (TLOF/FATO dimensions, design category, remarks) | M3 |
-| OSM geospatial enrichment (`dist_to_hospital_km`, `dist_to_city_center_km`) | M3 |
-| Streamlit Cloud deployment | M3 |
-| VLM helipad bounding-box validation (interactive overlay on helipad select) | M3 |
+| Item | Notes |
+|------|-------|
+| `src/model.py` — `build_features()`, `train_model()`, `evaluate_model()` | XGBoost binary classifier on structured registry features |
+| `merge_helipad_sources()` spatial deduplication | Currently a simple concat; spatial dedup intentionally deferred |
+| ADIP XLSX fetcher (TLOF/FATO dimensions, design category, remarks) | Raw JSON already in `data/adip_raw/` for offline field discovery |
+| OSM geospatial enrichment (`dist_to_hospital_km`, `dist_to_city_center_km`) | Requires geopandas joins; pre-compute offline → cache as Parquet |
+| VLM helipad bounding-box validation (interactive overlay on helipad select) | Plan in `.claude/plans/` — uses ESRI tiles + Claude vision API |
+| Streamlit Cloud deployment | Set env vars from `.env.example` |
