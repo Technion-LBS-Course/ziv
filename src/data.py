@@ -30,8 +30,9 @@ log = logging.getLogger(__name__)
 # ── file path constants ──────────────────────────────────────────────────────
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
-FAA_PATH = DATA_DIR / "faa_helipads_raw.csv"
-OSM_PATH = DATA_DIR / "osm_helipads_raw.csv"
+FAA_PATH         = DATA_DIR / "faa_helipads_raw.csv"
+FAA_ADIP_PATH    = DATA_DIR / "faa_adip_enriched.csv"   # produced by fetch_adip_details.py
+OSM_PATH         = DATA_DIR / "osm_helipads_raw.csv"
 OURAIRPORTS_PATH = DATA_DIR / "ourairports_raw.csv"
 
 # ── standard schema ──────────────────────────────────────────────────────────
@@ -85,11 +86,9 @@ def _enforce_schema(df: pd.DataFrame) -> pd.DataFrame:
 def load_faa_data(path: Path = FAA_PATH) -> pd.DataFrame:
     """Load and standardise FAA heliport records from the ADDS-FAA ArcGIS export.
 
-    Source: ADDS-FAA US_Airport FeatureServer (TYPE_CODE=HP).
-    The fetch script pre-parses DMS coordinates into ``lat``/``lon`` columns.
-    This loader handles both the pre-parsed columns and the raw DMS strings as
-    a fallback so the file is usable even if the fetch script is re-run without
-    the parsing step.
+    Prefers ``faa_adip_enriched.csv`` (produced by ``fetch_adip_details.py``)
+    over the raw ``faa_helipads_raw.csv`` when it exists, because the enriched
+    file adds ADIP columns that improve operational labels and freshness dates.
 
     ArcGIS field mapping used:
         NAME        → name
@@ -99,19 +98,29 @@ def load_faa_data(path: Path = FAA_PATH) -> pd.DataFrame:
         ELEVATION   → elevation_ft  (already in feet)
         PRIVATEUSE  → ownership_type: 0=public, 1=private
         MIL_CODE    → ownership_type: non-empty overrides to military
-        OPERSTATUS  → operational: "O" or empty = 1, other = 0
+        OPERSTATUS  → operational fallback when ADIP status absent
+
+    ADIP enrichment columns used when present:
+        adip_status       → operational (Operational=1, other=0)
+        last_info_days_ago → data_freshness_days
+        adip_lat/adip_lon → more precise ARP coordinates (SURVEYED records only)
 
     Args:
-        path: Path to the raw FAA helipad CSV.
+        path: Path to the raw FAA helipad CSV. If ``faa_adip_enriched.csv``
+              exists in the same directory it is loaded instead.
 
     Returns:
         DataFrame with standard SkyRoute schema columns. Rows with no
         valid lat/lon are dropped.
 
     Raises:
-        FileNotFoundError: If path does not exist.
+        FileNotFoundError: If neither the enriched nor the raw file exists.
     """
-    if not path.exists():
+    enriched = path.parent / "faa_adip_enriched.csv"
+    if enriched.exists():
+        log.info("Loading ADIP-enriched FAA data from %s", enriched.name)
+        path = enriched
+    elif not path.exists():
         raise FileNotFoundError(
             f"FAA data not found at {path}.\n"
             "Run:  python scripts/fetch_ny_data.py\n"
@@ -160,13 +169,27 @@ def load_faa_data(path: Path = FAA_PATH) -> pd.DataFrame:
         ownership = pd.Series("private", index=raw.index)
 
     # ── operational status ────────────────────────────────────────────────────
-    # OPERSTATUS: "O" = operational; "CI" = closed indefinitely; empty = unknown
-    status_col = _find_col(raw, ["OPERSTATUS"])
-    if status_col:
-        closed = raw[status_col].str.strip().str.upper().isin(["CI", "CP", "CLOSED"])
-        operational = (~closed).astype(int)
+    # Prefer ADIP status (authoritative NASR value) over ADDS-FAA OPERSTATUS.
+    # ADIP values seen: "Operational", "Closed", "Restricted"
+    adip_status_col = _find_col(raw, ["adip_status"])
+    if adip_status_col:
+        adip_op = raw[adip_status_col].str.strip().str.lower()
+        operational = adip_op.map(
+            lambda v: 1 if v == "operational" else (0 if pd.notna(v) and v else pd.NA)
+        ).astype("Int64")
+        # Fall back to OPERSTATUS for rows where ADIP status is missing
+        status_col = _find_col(raw, ["OPERSTATUS"])
+        if status_col:
+            closed_mask = raw[status_col].str.strip().str.upper().isin(["CI", "CP", "CLOSED"])
+            operational = operational.where(operational.notna(), (~closed_mask).astype(int))
+        operational = operational.fillna(1).astype(int)
     else:
-        operational = pd.Series(1, index=raw.index)
+        status_col = _find_col(raw, ["OPERSTATUS"])
+        if status_col:
+            closed = raw[status_col].str.strip().str.upper().isin(["CI", "CP", "CLOSED"])
+            operational = (~closed).astype(int)
+        else:
+            operational = pd.Series(1, index=raw.index)
 
     # ── assemble output ───────────────────────────────────────────────────────
     name_col  = _find_col(raw, ["NAME", "ARPTNAME"])
@@ -174,6 +197,29 @@ def load_faa_data(path: Path = FAA_PATH) -> pd.DataFrame:
     elev_col  = _find_col(raw, ["ELEVATION"])
 
     out = pd.DataFrame(index=raw.index)
+    # ── ADIP coordinate upgrade ───────────────────────────────────────────────
+    # Use ADIP ARP coordinates for records where the ADDS-FAA position was
+    # ESTIMATED; keep ADDS-FAA coordinates where ADIP has no improvement.
+    adip_lat_col    = _find_col(raw, ["adip_lat"])
+    adip_lon_col    = _find_col(raw, ["adip_lon"])
+    arp_method_col  = _find_col(raw, ["arp_method"])
+    if adip_lat_col and adip_lon_col and arp_method_col:
+        adip_lat = pd.to_numeric(raw[adip_lat_col], errors="coerce")
+        adip_lon = pd.to_numeric(raw[adip_lon_col], errors="coerce")
+        # Only upgrade when ADIP has a valid coordinate
+        use_adip = adip_lat.notna() & adip_lon.notna()
+        lat_series = adip_lat.where(use_adip, lat_series)
+        lon_series = adip_lon.where(use_adip, lon_series)
+        log.info("ADIP coordinate upgrade applied to %d records", use_adip.sum())
+
+    # ── data freshness ────────────────────────────────────────────────────────
+    freshness_col = _find_col(raw, ["last_info_days_ago"])
+    if freshness_col:
+        freshness = pd.to_numeric(raw[freshness_col], errors="coerce").fillna(0).astype(int)
+        log.info("Using ADIP last_info_days_ago for data_freshness_days")
+    else:
+        freshness = pd.Series(0, index=raw.index)
+
     out["source"]                 = "faa"
     out["name"]                   = raw[name_col].str.strip() if name_col else pd.NA
     out["lat"]                    = lat_series
@@ -182,7 +228,7 @@ def load_faa_data(path: Path = FAA_PATH) -> pd.DataFrame:
     out["elevation_ft"]           = pd.to_numeric(raw[elev_col], errors="coerce") if elev_col else pd.NA
     out["lighting"]               = False          # not available in ArcGIS export
     out["ownership_type"]         = ownership
-    out["data_freshness_days"]    = 0              # fetched today
+    out["data_freshness_days"]    = freshness
     out["source_agreement_count"] = 1
     out["operational"]            = operational
 

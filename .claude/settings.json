@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"/c/Users/ziv.goldenberg/OneDrive - UASC/Documents/Technion/0160833/ziv\" && find . -type f \\\\\\( -name \"*.py\" -o -name \"*.md\" -o -name \"*.txt\" -o -name \".gitignore\" \\\\\\) 2>/dev/null | sort)",
+      "Read(//c/c/Users/ziv.goldenberg/OneDrive - UASC/Documents/Technion/0160833/**)",
+      "Bash(python -c \"import pandas as pd; df = pd.read_csv\\(r'c:\\\\Users\\\\ziv.goldenberg\\\\OneDrive - UASC\\\\Documents\\\\Technion\\\\0160833\\\\ziv\\\\data\\\\faa_adip_enriched.csv', nrows=2\\); print\\(list\\(df.columns\\)\\)\")",
+      "Bash(python -c \"import pandas as pd; df = pd.read_csv\\(r'c:\\\\Users\\\\ziv.goldenberg\\\\OneDrive - UASC\\\\Documents\\\\Technion\\\\0160833\\\\ziv\\\\data\\\\faa_adip_enriched.csv'\\); print\\('Total:', len\\(df\\)\\); print\\('arp_method value_counts:'\\); print\\(df['arp_method'].value_counts\\(\\)\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py',encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")"
+    ]
+  }
+}
