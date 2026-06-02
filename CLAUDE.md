@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > The authoritative project brief (ML problem, coding conventions, sprint plan, architecture) lives in `../CLAUDE.md`. Read that first. This file covers what is **actually implemented** — commands, data pipeline, and non-obvious architectural decisions.
 
+> **Session log:** `Worklog.md` records every development session — what was built, issues hit, and how they were resolved. Read it to understand the history behind non-obvious decisions. **Update it at the end of every session before committing.**
+
 ---
 
 ## Commands
