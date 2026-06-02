@@ -85,21 +85,49 @@ For validated FAA helipads, the ADIP Airport Master Record provides TLOF/FATO di
 
 ## Formal ML Problem Statement
 
-HIE combines three validation signals — visual (Grounding DINO), textual (LLM search grounding), and structured (ADIP registry). The structured signal is formalised as a supervised binary classifier trained on registry features, described below. XGBoost is the M3 implementation target for this component.
+HIE combines three validation signals — visual (imagery-based object detection), textual (LLM search grounding), and structured (ADIP registry). This section covers both components.
+
+### M3 — Visual Helipad Detection (Primary)
+
+The core M3 ML task is **conformal helipad identification from satellite imagery**: given a 768×768 px ESRI World Imagery chip centred on a candidate coordinate, confirm whether a helipad is visually present and localise it with a calibrated confidence bound.
+
+*Conformal* means detection confidence scores are statistically calibrated against a held-out validation set so that the reported precision guarantee holds at the stated threshold — not just empirically observed but formally bounded.
 
 | Element | Detail |
 |---------|--------|
-| **Task** | Binary classification — helipad operational (1) vs. unreliable/decommissioned (0) |
-| **Input X** | Structured registry fields: ownership type, elevation, lighting, source agreement count, data freshness. Geospatial enrichment added in M3 (dist to hospital, city centre, population density) |
-| **Target y** | `operational` — binary label derived from ADIP status (authoritative) or OPERSTATUS field (fallback) |
-| **Loss** | Binary cross-entropy |
-| **Primary metric** | F1-score — **never accuracy** (class imbalance: most raw records are labeled "active" regardless of true status) |
-| **Split** | 70% train / 15% val / 15% test, stratified by U.S. state + ownership type |
-| **Baseline 1** | Majority-class classifier (predict all operational) |
-| **Baseline 2** | Logistic regression on structured fields only, no geospatial enrichment |
-| **Primary model** | XGBoost with `scale_pos_weight` for class imbalance — M3 |
-| **Comparison model** | Random Forest — M3 |
-| **Goal** | Test F1 > majority-class baseline. Stretch: val F1 ≥ 0.70 |
+| **Task** | Object detection — locate and classify helipad marker in satellite imagery chip |
+| **Input** | 768×768 px ESRI World Imagery tile (zoom 19, ~0.22 m/px at lat 42°) |
+| **Detection tiers** | Tier 1: OpenCV H-template matching (classical, <0.1 s); Tier 2: YOLOv8s fine-tuned (ML, ~0.1 s); Tier 3: Grounding DINO zero-shot (academic baseline only) |
+| **Training data** | ~3,500 positive tiles from HelipadCAT coordinates re-fetched via ESRI; ~3,500 negative tiles (random non-helipad locations, same source) |
+| **Geographic split** | Train/val: national FAA records outside NE US — Test: 747 NE US FAA records (never seen in training) |
+| **Loss** | YOLOv8 default: box regression (CIoU) + classification (BCE) |
+
+#### KPI Targets — M3
+
+| Metric | Target | Rationale |
+|--------|--------|-----------|
+| **Precision** | **> 0.95** | A false positive routes a passenger to a non-existent or unusable pad — unacceptable safety failure |
+| **Recall** | **0.50 – 0.75** | A missed helipad is simply absent from routing options; no safety consequence, only reduced coverage |
+| **mAP@50** | **> 0.90** | Standard YOLO object detection benchmark at IoU threshold 0.50 |
+
+> **Design rationale:** SkyRoute deliberately optimises for precision over recall. The routing engine operates on the set of *confirmed* helipads only. A missed detection reduces the option set but never creates a hazardous routing suggestion. This asymmetry justifies a high-confidence detection threshold that may leave some valid pads unconfirmed until manual review clears them.
+
+---
+
+### Structured Scoring — XGBoost (M3 complement)
+
+For FAA-only records with no OSM match (cannot be validated by imagery), a structured classifier scores operational risk from registry metadata alone.
+
+| Element | Detail |
+|---------|--------|
+| **Task** | Binary risk scoring — operational (0) vs. non-operational / stale (1) |
+| **Input X** | `ownership_type`, `elevation_ft`, `data_freshness_days`, `source_agreement_count`, `last_info_days_ago`, + engineered: `data_stale`, `high_inspection_age` |
+| **Target y** | `adip_status != "Operational"` → 1 |
+| **Primary metric** | F1-score on minority class — never accuracy |
+| **Split** | 70 / 15 / 15 stratified by state + ownership type |
+| **Baseline** | Majority-class classifier (predict all operational) |
+| **Primary model** | XGBoost with `scale_pos_weight = count(non-op) / count(op)` |
+| **Goal** | Test F1 > majority-class baseline |
 
 ---
 
@@ -144,7 +172,7 @@ app.py (Streamlit)
 |-----------|------|--------|-----------------|
 | M1 | 19 May 2026 | ✅ DONE | Repo, README, Sprint Plan, Pitch |
 | M2 | 02 Jun 2026 | ✅ DONE | Real data in app, EDA & HIE tab (3 charts + KPI density map), ADIP enrichment, cross-source matching |
-| M3 | 23 Jun 2026 | ⏳ PENDING | XGBoost classifier, VLM helipad overlay, OSM geospatial enrichment, Streamlit Cloud deployment |
+| M3 | 23 Jun 2026 | ⏳ PENDING | YOLOv8s helipad detector (Precision > 0.95, mAP@50 > 0.90), LLM status validation, XGBoost structured scoring, live detection overlay in app |
 | Final | 21 Jul 2026 | ⏳ PENDING | Demo Day, stable URL, documented |
 
 ---
