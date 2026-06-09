@@ -10,6 +10,143 @@ Update this file at the end of every session before committing.
 
 ---
 
+## 2026-06-08 — Post-Training Analysis Planning
+
+### Done
+- Defined two post-training analysis scripts that run after final YOLO weights exist:
+  1. **`scripts/compare_registry_accuracy.py`**: for each matched FAA+OSM pair, compare FAA vs OSM coordinate distance to YOLO-detected bbox centre. Outputs `data/registry_accuracy.csv`. Pairs >50m apart flagged as possibly different helipads.
+  2. **`scripts/validate_osm_only.py`**: fetch NAIP chips for OSM-only NE US helipads (no FAA match), run `detect_helipad_cascade()`, write `data/osm_validated.csv`. Visually confirmed pads join the M4 routing pool.
+- Defined 3-result academic comparison structure: Baseline / Preliminary YOLO (synthetic labels) / Final YOLO (fully verified test set). Preliminary results must be saved before retraining.
+- Updated README.md: M3 Progress table with 5 new rows, M4 checklist with post-training prerequisites, repo structure with 2 new scripts.
+- Updated CLAUDE.md: commands for both scripts, layout, M3 Still To Do rewrite, full architecture sections for both scripts.
+
+### Issues
+None — planning session only.
+
+### Resolved
+N/A
+
+---
+
+## 2026-06-07 — M4 Planning: NOTAM + RainViewer
+
+### Done
+- Defined M4 milestone (target 14 Jul 2026) with two new features:
+  1. **NOTAM airspace avoidance**: `src/notam.py` — FAA Digital NOTAM API (by IDENT + bbox), Aviation Weather Center METAR/TAF, per-helipad active-NOTAM badge in popups, NOTAM overlay layer (TFR polygons + point markers), route weather summary panel (VFR/MVFR/IFR colour-coded).
+  2. **RainViewer precipitation**: `src/weather.py` — fetch latest radar frame from `weather-maps.json`, add as toggleable Folium `TileLayer` (color 2, opacity 0.6), route precipitation check by sampling tile pixel at each waypoint, `st.warning` banner when intensity > 50.
+- Updated README.md: M4 row in sprint table, new data sources section (FAA NOTAM API, AVN Weather Center, RainViewer), M4 task checklist.
+- Updated CLAUDE.md: M4 commands, `src/notam.py` + `src/weather.py` in layout, full M4 architecture section with API URLs, non-obvious constraints, and `app.py` code patterns.
+
+### Issues
+None — planning session only.
+
+### Resolved
+N/A
+
+---
+
+## 2026-06-07 — M3: Zero-Shot Results, Training Script, Documentation
+
+### Done
+- Ran Grounding DINO on 5 test chips — fixed API break in transformers 4.51 (`box_threshold` removed from `post_process_grounded_object_detection`). Fix: remove `box_threshold=conf` from `detect_dino()` in `src/hie.py`. Now runs at ~5.6 s/chip, F1=0.00 as expected.
+- Zero-shot ablation confirmed: all three models (Classical CV, YOLO-World, Grounding DINO) achieve F1=0.00 on 747 NAIP test chips. Domain gap quantified.
+- Created `scripts/train_yolo.py`: trains YOLOv8s, evaluates on 747 test chips, computes registry-agreement baseline (FAA-ID matches < 10 m = TP, ≥ 10 m = FP, 50% OSM-only = FN), saves 5 plots to `models/plots/`.
+- M3 course alignment confirmed: CV detection pipeline (3 algorithms + baseline + train/test split + Streamlit demo) satisfies the course CV track. XGBoost `src/model.py` is optional.
+- OSM-only strategy: keep on map, not in test set; post-training run inference on OSM-only NAIP chips.
+- Updated README.md, CLAUDE.md with current state (annotation 1966/4027, zero-shot results, new scripts).
+
+### Issues
+- Florence-2 incompatible with transformers ≥ 4.49 (two missing attributes: `forced_bos_token_id`, `_supports_sdpa`). Disabled by default.
+
+### Resolved
+- Grounding DINO: removed `box_threshold` parameter (renamed/removed in transformers 4.51).
+- Florence-2: graceful fallback in `compare_zero_shot.py`; requires `pip install "transformers>=4.44,<4.49"` to enable.
+
+---
+
+## 2026-06-06 — M3: HIE Detection Module + Zero-Shot Comparison
+
+### Done
+
+**Zero-shot model selection (revised from original plan):**
+- Original plan: Grounding DINO tiny as sole zero-shot baseline
+- Research finding: Grounding DINO has documented poor zero-shot performance on nadir aerial imagery (arxiv 2601.22164) — accuracy improves only with domain adaptation
+- New choice: **YOLO-World small** as primary zero-shot comparison (already in ultralytics install, <1s/chip, designed for small objects); **Florence-2-base** as secondary
+- Grounding DINO retained as optional `--models dino` flag
+
+**`src/hie.py` — HIE visual detection module:**
+- `load_chip()` — load 640×640 NAIP chip from disk
+- `detect_classical()` — OpenCV H-template bank (3 scales × 2 rotations × 2 colour variants), threshold 0.72
+- `detect_yolo()` — YOLOv8s fine-tuned inference (Tier 2, uses `models/helipad_yolov8s.pt`)
+- `detect_yolo_world()` — YOLO-World small zero-shot, classes: `["helipad", "landing pad", "H marking"]`
+- `detect_florence2()` — Florence-2-base `<OPEN_VOCABULARY_DETECTION>helipad`
+- `detect_dino()` — optional Grounding DINO tiny
+- `detect_helipad_cascade()` — Tier1 → Tier2 production cascade
+- `bbox_px_to_latlon()` and `compute_offset_m()` — coordinate utilities
+
+**`scripts/compare_zero_shot.py` — ablation comparison:**
+- Reads 747 NAIP test chips + GT labels
+- Runs selected models, computes IoU vs GT, writes `data/yolo_dataset/zero_shot_results.csv`
+- Prints Precision / Recall / F1 / mean latency table
+- `--resume` flag for restartability; `--models` to pick subset; `--limit` for smoke tests
+- Can run TODAY — no trained YOLO weights needed
+
+**`requirements.txt` updated:** `transformers`, `timm`, `einops` moved from comments to active deps (Florence-2 requirements)
+
+### Issues
+None — smoke tests all passed on first run.
+
+### Resolved
+N/A
+
+---
+
+## 2026-06-03 — M3: YOLO Dataset Pipeline + Annotation Review Tool
+
+### Done
+
+**YOLO dataset pipeline (`scripts/build_yolo_dataset.py`):**
+- 8-step resumable pipeline: HelipadCAT CSV → national FAA staleness filter → NE US geographic dedup → NAIP chip fetch → easy negatives → YOLO labels + split → HTML review galleries
+- NAIP imagery source: USDA APFO `USDA_CONUS_PRIME/ImageServer/exportImage` — pure HTTP GET, no rasterio, no authentication
+- 100m × 100m window → 640×640 px → effective GSD 0.156 m/px (between ESRI zoom 19 and 20)
+- Per-latitude bbox scale factor `_bbox_pixel_scale(lat)`: converts HelipadCAT zoom-20 bboxes to NAIP chip space
+- Retry logic: 3 attempts with 10s/20s/40s back-off for USDA server timeouts
+- Dataset: ~5000 CONUS chips (positive + hard-negative + easy-negative) + 747 NE US test chips
+
+**Annotation review tool (`scripts/annotate_dataset.py`):**
+- Standalone Streamlit app: approve / disqualify / adjust bbox with live slider preview
+- Decisions persisted to `data/yolo_dataset/review_decisions.csv` — survives Ctrl+C
+- Approve auto-detects if sliders were moved and saves adjusted bbox
+- Disqualify → empty YOLO label → chip becomes hard negative training example
+- "Apply all decisions" writes final YOLO label files
+
+**Infrastructure:**
+- Fixed `.gitignore` inline comment bug (trailing `# comment` is NOT a git comment)
+- Added `models/` directory with `.gitkeep`
+- Updated CLAUDE.md and README.md
+
+### Issues
+
+1. **`ValueError: invalid literal for int() with base 10: 'other'`** — HelipadCAT `category` column has string values, not only integers
+2. **Planetary Computer + rasterio**: rasterio COG reads fail on Windows (pip GDAL VSICURL issue with Azure Blob SAS tokens) — 41% failure rate on NE US test set
+3. **ESRI zoom-20 gray tiles** — `USDA_Alaska_PRIME` service doesn't exist at `gis.apfo.usda.gov`; only `USDA_CONUS_PRIME` is available
+4. **`data/yolo_dataset/` not gitignored** — 2000+ image chips showing as untracked files in VS Code ("too many active changes")
+5. **`PermissionError` on label file in gallery** — OneDrive locks .txt files during sync
+6. **`use_container_width`** in annotation tool — Streamlit 1.36.x uses `use_column_width`
+7. **`IndexError: Cannot choose from an empty sequence`** in step6 — `--limit 20` hits Alaska-only records, zero positive chips
+
+### Resolved
+
+1. Wrapped `int(row.get("category", -1))` in `try/except (ValueError, TypeError)` → default -1
+2. Replaced Planetary Computer + rasterio with USDA APFO `exportImage` endpoint (same `requests` session, no new dependencies)
+3. `_naip_export_url()` returns `None` for lat outside 24–49.5°N → clean `NoImageryError`
+4. Fixed `.gitignore`: moved inline comments to their own lines (`# comment` on a separate line above the pattern)
+5. Wrapped `lbl_path.read_text()` in `try/except (PermissionError, OSError)` in gallery builder
+6. Changed `use_container_width=True` → `use_column_width=True`
+7. Added fallback: if no positive chips, seed easy negatives from all saved records; if still empty, skip step 6 gracefully
+
+---
+
 ## 2026-05-17 — M1: Project Initialisation
 
 **Commits:** `e3f3913`, `da5cf31`

@@ -24,6 +24,26 @@ folium>=0.17.0,<0.18.0
 branca>=0.8.0,<0.9.0
 streamlit-folium>=0.20.0,<0.21.0
 
+# ── NAIP imagery (M3 dataset build) ─────────────────────────────────────────
+planetary-computer>=1.0.0,<2.0.0
+pystac-client>=0.7.0,<0.9.0
+rasterio>=1.3.0,<1.4.0
+# rasterio requires GDAL native libs; on Windows use conda or OSGeo4W:
+#   conda install -c conda-forge rasterio
+# On Linux/Mac:  pip install rasterio works directly.
+
+# ── computer vision / ML (M3) ────────────────────────────────────────────────
+Pillow>=10.0.0,<11.0.0
+opencv-python>=4.9.0,<4.11.0
+ultralytics>=8.2.0,<8.4.0
+# torch: install separately via pip (platform-specific wheels)
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# For CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+transformers>=4.51.0,<4.52.0
+timm>=0.9.0,<1.1.0
+einops>=0.7.0,<0.9.0
+anthropic>=0.40.0,<0.50.0
+
 # ── utilities ────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0,<1.1.0
 tqdm>=4.66.0,<4.67.0

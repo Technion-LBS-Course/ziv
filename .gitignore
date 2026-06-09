@@ -20,6 +20,22 @@ data/*.json
 data/*.geojson
 data/*.xlsx
 data/adip_raw/
+# YOLO dataset — large image tiles, never commit
+data/yolo_dataset/
+data/helipadcat_raw.csv
+data/faa_national.csv
+
+# Models — production weights + plots committed; training run bulk files excluded
+models/*.pkl
+models/*.json
+# Auto-downloaded YOLO base weights at repo root (not our trained model)
+yolov8s*.pt
+yolov8m*.pt
+# Training run: duplicate weights and large diagnostic batch images
+models/helipad_run/weights/
+models/helipad_run/train_batch*.jpg
+models/helipad_run/val_batch*.jpg
+models/helipad_run/labels.jpg
 
 # Secrets
 .env
