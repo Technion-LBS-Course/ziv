@@ -10,6 +10,61 @@ Update this file at the end of every session before committing.
 
 ---
 
+## 2026-06-13 — M3 Final: 4-Model Comparison, Inspector Tab, Results Tab Polish
+
+### Done
+
+**4-model comparison (`scripts/compare_models.py`):**
+- New unified evaluation script: runs YOLOv8s, YOLO11s, YOLO11m, RT-DETR-L on the same 747 NE US test chips using the same methodology from `train_yolo.py`
+- Saves per-model metrics (`comparison_metrics.json`) and full confidence-sweep curve arrays (`comparison_curves.json`) to `models/plots_comparison/`
+- Generates 4 comparison plots: radar chart (P/R/F1/Accuracy), PR curve, P vs conf, R vs conf
+- Generates 5 per-model individual plots for each model: pr.png, f1_conf.png, precision_conf.png, recall_conf.png, confusion.png (consistent style across all 4 models)
+- Final results on 747 test chips: YOLOv8s P=0.906/R=0.801/F1=0.850, RT-DETR-L P=0.907/R=0.815/F1=0.859, YOLO11s P=0.908/R=0.866/F1=0.887, **YOLO11m P=0.931/R=0.848/F1=0.888 (production model)**
+- `--plots-only` flag regenerates all charts from cached JSON without re-running inference
+- `--limit N` for smoke test; cache check requires both JSON files to exist
+
+**XGBoost training (`scripts/train_xgboost.py`):**
+- Implemented full training pipeline using 17 ADIP-derived features
+- Fixed `results_df.gt` → `results_df["gt"]` (pandas method vs column access)
+- Fixed feature importance lookup: `importance.get(name, 0.0)` using actual column names (not positional `f0`/`f1` aliases)
+- Final result: P=0.74 · R=0.72 · F1=0.73 on test set
+- Added `position_age_days` distribution chart and has_wind windsock image with YouTube link
+
+**Streamlit app (`app.py`) — 6-tab layout finalised:**
+- Added Inspector tab (🔍) and Results tab (📈) to the tab bar
+- **Inspector tab**: `@st.experimental_fragment` isolation prevents full-app reruns on widget interaction; auto-jump on dropdown selection (no button needed); NAIP chip + reference map side-by-side in 1:1 columns; Live Inference mode with FAA NE US / OSM NE US / FAA CONUS overlay layers as separate checkboxes
+- **Results tab**: two sub-tabs — XGBoost Structured Baseline (first) / YOLO Models Comparison (second); radar chart comparison + PR curve side-by-side; action caption below radar describing model recommendation (YOLO11m = production, YOLO11s = discovery)
+- Reference map uses CartoDB dark_matter default with OpenStreetMap light overlay; no ESRI satellite (was returning HTTP 500)
+- Radar chart: zoomed polar axis with explicit inner-ring note; light/bright background; figure-level legend placed below chart (ncol=2, bbox_to_anchor=(0.5, 0.13)); note at y=0.07
+
+**Bug fixes:**
+- `_BE` NameError at Inspector line: `from branca.element import Element as _BE` moved to module level
+- `_show_pil` / `_safe_image` NameError: both helper functions moved to before `with tab_inspector:`
+- `use_container_width` TypeError on older Streamlit: `_show_pil` tries `use_container_width=True`, falls back to `use_column_width="always"` on TypeError
+- OMP Error #15 (Windows OpenMP duplicate): `os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"` at file top before all imports
+- `torch.classes` Streamlit watcher error: `torch.classes.__path__ = []` after torch import
+- ESRI `MapServer/export` unreliable (HTTP 500, timeout): rewrote `fetch_esri_chip()` to use individual XYZ tile stitching (3×3 grid at zoom 18, mosaic → crop → resize)
+- `compare_models.py` KeyError: `compute_yolo_metrics()` returns `best_precision`/`best_recall`/`best_f1` not `precision`/`recall`/`f1`
+
+**Infrastructure:**
+- `.streamlit/config.toml` — `fileWatcherType = "watchdog"` to suppress torch.classes watch error
+
+### Issues
+
+1. **ESRI imagery fetch HTTP 500** — `MapServer/export` endpoint returned HTTP 500 for ~30% of requests, full timeouts for others
+2. **OMP Error #15** — Windows duplicate OpenMP DLL (numpy + PyTorch + XGBoost all ship their own libiomp5md.dll)
+3. **torch.classes watcher error** — Streamlit file-watcher attempts to inspect `torch.classes.__path__` which raises C++ exception in Python
+4. **Radar chart legend obscuring upper portion** — `ax.legend()` placed at `bbox_to_anchor=(1.55, 1.18)` overlapped the chart area
+
+### Resolved
+
+1. Replaced `MapServer/export` with individual XYZ tile fetch at zoom 18 (3×3 grid of 256×256 tiles, stitched into 768×768 mosaic, cropped to exact 100m window, resized to 640×640) — same URL pattern as Folium base map tiles
+2. `os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"` before any imports at top of `app.py`
+3. `torch.classes.__path__ = []` after `import torch`; confirmed non-fatal (log noise only), optional `.streamlit/config.toml` `fileWatcherType = "watchdog"` as belt-and-suspenders
+4. Switched to `fig.legend()` (figure-level) at `bbox_to_anchor=(0.5, 0.13)`, `ncol=2`; `fig.subplots_adjust(bottom=0.22)`; note moved up to `fig.text(0.5, 0.07, ...)`
+
+---
+
 ## 2026-06-08 — Post-Training Analysis Planning
 
 ### Done

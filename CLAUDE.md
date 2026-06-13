@@ -78,6 +78,20 @@ python scripts/train_yolo.py --device 0
 # tests/ directory is not yet created (M2 deliverable)
 # When it exists: pytest tests/
 
+# ── M3 XGBoost training ───────────────────────────────────────────────────────
+# Train XGBoost on 17 ADIP-derived features; outputs models/xgboost/hie_xgboost.pkl
+python scripts/train_xgboost.py
+
+# ── M3 4-model comparison (requires all 4 trained .pt files) ─────────────────
+# Full run: evaluate YOLOv8s + YOLO11s + YOLO11m + RT-DETR-L on 747 test chips
+python scripts/compare_models.py
+
+# Regenerate plots only (skip inference — uses cached JSON)
+python scripts/compare_models.py --plots-only
+
+# Smoke test first N chips
+python scripts/compare_models.py --limit 20
+
 # ── Post-training analysis (run after helipad_yolov8s.pt exists) ─────────────
 # Registry accuracy: which source (FAA or OSM) is spatially closer to YOLO detection?
 python scripts/compare_registry_accuracy.py
@@ -123,7 +137,7 @@ ziv/
 ├── README.md               ← Project overview, persona, ML formulation
 ├── Worklog.md              ← Session-by-session log of decisions and issues
 ├── requirements.txt        ← Pinned dependencies
-├── app.py                  ← Streamlit dashboard (~2700 lines)
+├── app.py                  ← Streamlit dashboard (~3600 lines)
 ├── src/
 │   ├── __init__.py
 │   ├── data.py             ← Ingestion, cleaning, schema normalisation
@@ -137,10 +151,19 @@ ziv/
 │   ├── annotate_dataset.py    ← Streamlit annotation review tool (approve/disqualify/adjust)
 │   ├── compare_zero_shot.py   ← Zero-shot ablation on 747 test chips (Classical/YOLO-World/DINO)
 │   ├── train_yolo.py          ← Train YOLOv8s + evaluate vs registry baseline + 5 plots
+│   ├── train_xgboost.py       ← Train XGBoost on 17 ADIP features; outputs hie_xgboost.pkl
+│   ├── compare_models.py      ← Unified 4-model evaluation (YOLOv8s/YOLO11s/YOLO11m/RT-DETR-L)
+│   ├── fix_split_duplicates.py ← One-time fix: removes 570 train/val duplicate chips (run with --apply)
 │   ├── compare_registry_accuracy.py  ← FAA vs OSM coordinate accuracy vs YOLO bbox centre
 │   └── validate_osm_only.py   ← NAIP inference on OSM-only pads → data/osm_validated.csv
 ├── models/
-│   └── .gitkeep            ← Trained YOLO weights land here (helipad_yolov8s.pt, M3)
+│   ├── helipad_yolov8s.pt              ← YOLOv8s fine-tuned weights
+│   ├── helipad_run_yolo11s/weights/best.pt  ← YOLO11s (discovery model)
+│   ├── helipad_run_yolo11m/weights/best.pt  ← YOLO11m (production model — P=0.931 F1=0.888)
+│   ├── helipad_run_rtdetr_l/weights/best.pt ← RT-DETR-L transformer baseline
+│   ├── plots/                  ← YOLOv8s training plots (from train_yolo.py)
+│   ├── plots_comparison/       ← 4-model comparison plots (from compare_models.py)
+│   └── xgboost/                ← XGBoost model + feature importance
 ├── assets/
 │   └── helipad_grounding_dino.jpg
 ├── data/                   ← All data files — NEVER commit (gitignored)
@@ -349,7 +372,7 @@ Name similarity strips OSM "Helipad"/"Heliport" suffixes before comparison *unle
 ### Tab structure
 
 ```
-st.tabs(["📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE"])
+st.tabs(["📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE", "🔍 Inspector", "📈 Results"])
 ```
 
 **Tab 1 — Problem**
@@ -383,6 +406,17 @@ st.tabs(["📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE"])
 - Executive residence spider map
 - Multi-modal routing simulator (HTML/JS component)
 
+**Tab 5 — Inspector (🔍)**
+- Isolated via `@st.experimental_fragment` — widget interactions in this tab don't trigger full-app reruns
+- **Mode A — Test Set Inspector:** dropdown of 747 NE US helipads by TP/TN/FP/FN category; auto-jumps on selection (no Jump button); NAIP chip + YOLO bbox annotation (left) + CartoDB/OSM reference map (right) in 1:1 side-by-side layout
+- **Mode B — Live Inference:** pan/click Folium map → fetch 100m NAIP chip + ESRI XYZ tile chip in real-time → run YOLO → show bbox; checkboxes to toggle FAA NE US / OSM NE US / FAA CONUS overlay layers independently
+- ESRI chip fetched via 3×3 XYZ tile grid at zoom 18 (stitched, cropped, resized) — `fetch_esri_chip()` in `src/hie.py`
+
+**Tab 6 — Results (📈)**
+- Two sub-tabs: `["📊 XGBoost Structured Baseline", "🤖 YOLO Models Comparison"]`
+- XGBoost sub-tab: F1 lift over majority, feature importance bar chart, has_wind spotlight (windsock image + YouTube link), position_age_days distribution chart, full classification report
+- YOLO sub-tab: 4 metric KPI tiles → radar chart + PR curve side-by-side → action caption (YOLO11m = production / YOLO11s = discovery) → P vs conf + R vs conf → individual model expanders (each with 5 plots)
+
 ### Caching strategy
 
 `@st.cache_data` on: `load_data()`, `compute_matches()`, `compute_threshold_curve()`, `build_search_entries()`, `fetch_imagery_meta()`.
@@ -402,6 +436,9 @@ Uses `_bk_ver` (int) as the Folium component `key`. Incrementing it forces a ful
 | `_last_center`, `_last_zoom` | Updated from `map_state`; used for imagery metadata caption |
 | `_last_bk_ver` | Detects a fresh jump to pre-populate `_last_center` before user pans |
 | `_ac_last`, `_af_last` | Debounce autocomplete / analysis-filter selects |
+| `_insp_a_ident` | Last-rendered Inspector Mode A ident — detects selectbox change for auto-jump |
+| `_insp_a_chip`, `_insp_a_res` | Cached chip PIL image and YOLO result for current Inspector A selection |
+| `_insp_b_faa`, `_insp_b_osm`, `_insp_b_conus` | Inspector Mode B layer visibility checkboxes |
 
 ### Two `with st.sidebar:` blocks
 
@@ -444,63 +481,48 @@ Every FAA marker popup contains:
 
 ---
 
-## M3 Status
+## M3 Status — COMPLETE (2026-06-13)
 
-### Done
-| Item | File | Notes |
-|------|------|-------|
-| YOLO dataset pipeline | `scripts/build_yolo_dataset.py` | 8-step, NAIP imagery, 2584 train + 696 val + 747 test chips |
-| Annotation review tool | `scripts/annotate_dataset.py` | Streamlit, persists to review_decisions.csv |
-| HIE detection module | `src/hie.py` | `detect_classical()`, `detect_yolo()`, `detect_yolo_world()`, `detect_florence2()`, `detect_dino()`, cascade, `bbox_px_to_latlon()` |
-| Zero-shot comparison script | `scripts/compare_zero_shot.py` | Classical CV, YOLO-World, Grounding DINO, Florence-2 on 747 test chips |
-| Training + evaluation script | `scripts/train_yolo.py` | Trains YOLOv8s, evaluates vs registry baseline, saves 5 plots to `models/plots/` |
+### Final model results (747 NE US test chips)
 
-### Zero-shot baseline results (2026-06-07)
-All three zero-shot models confirmed to fail on NAIP imagery — domain gap quantified:
+| Model | Precision | Recall | F1 | Accuracy | Notes |
+|-------|-----------|--------|----|----------|-------|
+| Registry baseline | 0.63 | 0.21 | 0.32 | — | FAA-ID cross-reference only, no imagery |
+| Classical CV (zero-shot) | — | — | 0.00 | — | H-template; building-corner false positives |
+| YOLO-World (zero-shot) | — | — | 0.00 | — | Total domain gap |
+| Grounding DINO (zero-shot) | — | — | 0.00 | — | Partial IoU ~0.16; no reliable localisation |
+| YOLOv8s fine-tuned | 0.906 | 0.801 | 0.850 | 0.837 | CNN baseline |
+| RT-DETR-L fine-tuned | 0.907 | 0.815 | 0.859 | 0.845 | Transformer; training instability at epoch 32 |
+| YOLO11s fine-tuned | 0.908 | 0.866 | 0.887 | 0.871 | Best recall (discovery model) |
+| **YOLO11m fine-tuned** | **0.931** | 0.848 | **0.888** | **0.876** | **Production model — fewest FP=27** |
 
-| Model | F1 | Lat/chip | Root cause |
-|---|---|---|---|
-| Classical CV | 0.00 | ~0.13 s | H-template fires on building corners; IoU ≈ 0 |
-| YOLO-World small | 0.00 | ~0.2 s | Total domain gap — natural-image training |
-| Grounding DINO tiny | 0.00 | ~5.6 s | Partial IoU (~0.16) but no reliable localisation |
-| Florence-2-base | disabled | — | Incompatible with transformers ≥ 4.49 |
+XGBoost structured baseline (17 ADIP features, no imagery): P=0.74 · R=0.72 · **F1=0.73**
 
-**Grounding DINO API fix (transformers 4.51):** `post_process_grounded_object_detection()` no longer accepts `box_threshold`. Fixed in `src/hie.py` — removed `box_threshold=conf`, kept only `text_threshold=conf`.
+### Completed deliverables
 
-### M3 course requirements (CV track satisfied)
-- 3 algorithms: Classical CV · YOLO-World · YOLOv8s fine-tuned ✓
-- Baseline: registry-agreement baseline (FAA-ID matches < 10 m = TP) ✓
-- KPI: mAP@50, Precision, Recall, F1 ✓
-- Train/val/test split: 2584 / 696 / 747 ✓
-- Streamlit demo: map click → YOLO detection ✓
-- `src/model.py` XGBoost classifier is **optional** enrichment, not required for rubric
+| Item | File |
+|------|------|
+| YOLO dataset pipeline | `scripts/build_yolo_dataset.py` |
+| Annotation review tool | `scripts/annotate_dataset.py` |
+| Split duplicate fix | `scripts/fix_split_duplicates.py` |
+| HIE detection module | `src/hie.py` |
+| Zero-shot ablation | `scripts/compare_zero_shot.py` |
+| YOLOv8s training + eval | `scripts/train_yolo.py` |
+| 4-model comparison | `scripts/compare_models.py` |
+| XGBoost training | `scripts/train_xgboost.py` + `src/model.py` |
+| Inspector tab (live HIE) | `app.py` — fragment-isolated, auto-jump, side-by-side chip+map |
+| Results tab (YOLO + XGBoost) | `app.py` — radar chart, PR curve, per-model plots, action captions |
 
-### OSM-only pad strategy
-- Currently displayed in `app.py` OSM layer (unvalidated)
-- NOT in 747-chip test set (FAA records only)
-- Post-training: fetch NAIP chips for OSM-only NE US coords → run `detect_helipad_cascade()` → add `hie_visual_detected` flag
-- Phase 2 (`src/validation.py`): named OSM pads → Claude Haiku; unnamed → Overpass heuristic
+### Grounding DINO API fix (transformers 4.51)
+`post_process_grounded_object_detection()` no longer accepts `box_threshold`. Fixed in `src/hie.py` — removed `box_threshold=conf`, kept only `text_threshold=conf`.
 
-### Annotation progress (2026-06-07)
-- Total: 4,027 chips (2584 train + 696 val + 747 test)
-- Reviewed: 1,966 (795 approved · 315 disqualified · 856 adjusted)
-- Unreviewed ~2,061 chips retain synthetic centre labels — valid since helipads ARE at chip centre by construction
-- Training can proceed on partial annotations; retrain after completion for final numbers
-
-### Still To Do
-| Item | Priority | Notes |
-|------|----------|-------|
-| Preliminary training — save results | High | Rename `models/helipad_run/` before retraining so preliminary plots aren't overwritten |
-| Finish test set annotation (747 chips) | High | Verify all 747 test chips one by one — clean ground truth for final evaluation |
-| Finish train/val annotation (~2061 remaining) | Medium | Improves final model quality; not needed for preliminary results |
-| YOLOv8s final training | High | After full annotation; produces 3-way comparison: Baseline / Preliminary / Final |
-| `scripts/compare_registry_accuracy.py` | High | Post-final-training; which registry coordinate is closer to YOLO detection per matched pair |
-| `scripts/validate_osm_only.py` | High | Post-final-training; cascade inference on OSM-only pads; output feeds M4 routing pool |
-| Live detection overlay `app.py` | Medium | Swap to fine-tuned weights after training |
-| `src/validation.py` Phase 2 LLM | Low | Claude Haiku + Overpass heuristic |
-| `src/model.py` XGBoost | Optional | Not required for M3 rubric |
-| Streamlit Cloud deployment | M3 final | Set env vars from `.env.example` |
-| `merge_helipad_sources()` spatial dedup | Deferred | Currently simple concat |
+### Post-M3 items (start after M3 submission 23 Jun 2026)
+| Item | Notes |
+|------|-------|
+| `scripts/compare_registry_accuracy.py` | FAA vs OSM coordinate accuracy vs YOLO bbox centre → `data/registry_accuracy.csv` |
+| `scripts/validate_osm_only.py` | Cascade inference on OSM-only NE US pads → `data/osm_validated.csv`; feeds M4 routing pool |
+| Streamlit Cloud deployment | Set env vars from `.env.example` |
+| `merge_helipad_sources()` spatial dedup | Currently simple concat |
 
 ---
 

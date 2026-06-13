@@ -52,13 +52,15 @@ DATASET_YAML     = _PROJ_ROOT / "data" / "yolo_dataset" / "dataset.yaml"
 TEST_IMAGES_DIR  = _PROJ_ROOT / "data" / "yolo_dataset" / "images" / "test"
 TEST_LABELS_DIR  = _PROJ_ROOT / "data" / "yolo_dataset" / "labels" / "test"
 DECISIONS_CSV    = _PROJ_ROOT / "data" / "yolo_dataset" / "review_decisions.csv"
-MODELS_DIR       = _PROJ_ROOT / "models"
-PLOTS_DIR        = MODELS_DIR / "plots"
-RUN_DIR          = MODELS_DIR / "helipad_run"
-BEST_WEIGHTS     = RUN_DIR / "weights" / "best.pt"
-PIPELINE_WEIGHTS = MODELS_DIR / "helipad_yolov8s.pt"
-FAA_CSV          = _PROJ_ROOT / "data" / "faa_adip_enriched.csv"
-OSM_CSV          = _PROJ_ROOT / "data" / "osm_helipads_raw.csv"
+MODELS_DIR        = _PROJ_ROOT / "models"
+PLOTS_DIR         = MODELS_DIR / "plots"
+PRELIM_PLOTS_DIR  = MODELS_DIR / "plots_preliminary"
+RUN_DIR           = MODELS_DIR / "helipad_run"
+BEST_WEIGHTS      = RUN_DIR / "weights" / "best.pt"
+PIPELINE_WEIGHTS  = MODELS_DIR / "helipad_yolov8s.pt"
+PRELIM_WEIGHTS    = MODELS_DIR / "helipad_yolov8s_preliminary.pt"
+FAA_CSV           = _PROJ_ROOT / "data" / "faa_adip_enriched.csv"
+OSM_CSV           = _PROJ_ROOT / "data" / "osm_helipads_raw.csv"
 
 IOU_THRESH = 0.50
 
@@ -364,6 +366,78 @@ def plot_comparison_bar(yolo: dict, baseline: dict, out: Path) -> None:
         _save(fig, out)
 
 
+def save_eval_metrics(yolo: dict, baseline: dict | None, out: Path) -> None:
+    """Persist evaluation metrics to a JSON file for 3-way comparison later."""
+    import json
+    payload = {
+        "precision":  yolo["best_precision"],
+        "recall":     yolo["best_recall"],
+        "f1":         yolo["best_f1"],
+        "threshold":  yolo["best_threshold"],
+        "tp": yolo["tp"], "fp": yolo["fp"],
+        "fn": yolo["fn"], "tn": yolo["tn"],
+    }
+    if baseline:
+        payload["baseline"] = {
+            "precision": baseline["precision"],
+            "recall":    baseline["recall"],
+            "f1":        baseline["f1"],
+        }
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    log.info("Eval metrics saved to %s", out)
+
+
+def load_eval_metrics(path: Path) -> dict | None:
+    """Load previously saved eval metrics JSON; return None if file missing."""
+    import json
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("Could not load eval metrics from %s: %s", path, exc)
+        return None
+
+
+def plot_3way_comparison(
+    final: dict,
+    prelim: dict,
+    baseline: dict | None,
+    out: Path,
+) -> None:
+    """Bar chart: Baseline / Preliminary YOLO / Final YOLO — P, R, F1 side-by-side."""
+    metrics = ["Precision", "Recall", "F1"]
+
+    base_vals  = [baseline.get("precision", 0), baseline.get("recall", 0), baseline.get("f1", 0)] \
+                  if baseline else [0, 0, 0]
+    prelim_vals = [prelim["precision"], prelim["recall"], prelim["f1"]]
+    final_vals  = [final["best_precision"], final["best_recall"], final["best_f1"]]
+
+    x     = np.arange(len(metrics))
+    width = 0.25
+
+    with plt.rc_context(_PLT_STYLE):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        bars = [
+            ax.bar(x - width, base_vals,   width, label="Registry baseline",        color="#dc2626", alpha=0.82),
+            ax.bar(x,         prelim_vals,  width, label="YOLOv8s preliminary (synthetic GT)", color="#f59e0b", alpha=0.82),
+            ax.bar(x + width, final_vals,   width, label="YOLOv8s final (verified GT)",        color="#2563eb", alpha=0.82),
+        ]
+        for bar_group in bars:
+            for bar in bar_group:
+                h = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width() / 2, h + 0.01,
+                        f"{h:.2f}", ha="center", va="bottom", fontsize=8)
+        ax.set_xticks(x)
+        ax.set_xticklabels(metrics)
+        ax.set_ylim(0, 1.22)
+        ax.set_ylabel("Score")
+        ax.set_title("3-Way Comparison: Baseline → Preliminary → Final")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3, axis="y")
+        _save(fig, out)
+
+
 def plot_confusion_matrix(yolo: dict, out: Path) -> None:
     # Layout: rows = actual, cols = predicted
     #  [[TP, FN],
@@ -427,9 +501,17 @@ def main() -> None:
                         help="'cpu', '0', '0,1' … (default: auto-detect GPU)")
     parser.add_argument("--baseline-dist", type=float, default=10.0,
                         help="FAA-OSM distance threshold for baseline TP in metres (default: 10)")
+    parser.add_argument("--weights", type=Path, default=None,
+                        help="Override weights file for --skip-train evaluation "
+                             "(e.g. models/helipad_yolov8s_preliminary.pt)")
+    parser.add_argument("--out-dir", type=Path, default=None,
+                        help="Directory to write plots and eval_results.json "
+                             "(default: models/plots/)")
     args = parser.parse_args()
 
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Resolve output directory
+    out_dir = args.out_dir if args.out_dir else PLOTS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── annotation state check ────────────────────────────────────────────────
     if DECISIONS_CSV.exists():
@@ -449,7 +531,12 @@ def main() -> None:
 
     # ── train or load ─────────────────────────────────────────────────────────
     if args.skip_train:
-        if BEST_WEIGHTS.exists():
+        if args.weights:
+            weights = args.weights
+            if not weights.exists():
+                log.error("--weights file not found: %s", weights)
+                sys.exit(1)
+        elif BEST_WEIGHTS.exists():
             weights = BEST_WEIGHTS
         elif PIPELINE_WEIGHTS.exists():
             weights = PIPELINE_WEIGHTS
@@ -506,14 +593,33 @@ def main() -> None:
     yolo_m     = compute_yolo_metrics(chip_results)
     baseline_m = compute_baseline(args.baseline_dist)
 
+    # ── save metrics ──────────────────────────────────────────────────────────
+    save_eval_metrics(yolo_m, baseline_m, out_dir / "eval_results.json")
+
     # ── plots ─────────────────────────────────────────────────────────────────
-    log.info("Generating plots in %s …", PLOTS_DIR)
-    plot_pr_curve(yolo_m, baseline_m, PLOTS_DIR / "pr_curve.png")
-    plot_f1_threshold(yolo_m, PLOTS_DIR / "f1_threshold.png")
-    plot_yolo_metrics_bar(yolo_m, PLOTS_DIR / "yolo_metrics_bar.png")
-    plot_confusion_matrix(yolo_m, PLOTS_DIR / "confusion_matrix.png")
+    log.info("Generating plots in %s …", out_dir)
+    plot_pr_curve(yolo_m, baseline_m, out_dir / "pr_curve.png")
+    plot_f1_threshold(yolo_m, out_dir / "f1_threshold.png")
+    plot_yolo_metrics_bar(yolo_m, out_dir / "yolo_metrics_bar.png")
+    plot_confusion_matrix(yolo_m, out_dir / "confusion_matrix.png")
     if baseline_m:
-        plot_comparison_bar(yolo_m, baseline_m, PLOTS_DIR / "comparison_bar.png")
+        plot_comparison_bar(yolo_m, baseline_m, out_dir / "comparison_bar.png")
+
+    # ── 3-way comparison (final run only — requires preliminary metrics) ───────
+    if out_dir == PLOTS_DIR or out_dir.resolve() == PLOTS_DIR.resolve():
+        prelim_m = load_eval_metrics(PRELIM_PLOTS_DIR / "eval_results.json")
+        if prelim_m:
+            plot_3way_comparison(yolo_m, prelim_m, baseline_m,
+                                 out_dir / "comparison_3way.png")
+            log.info("3-way comparison saved to %s", out_dir / "comparison_3way.png")
+        else:
+            log.info(
+                "Preliminary metrics not found — skipping 3-way comparison.\n"
+                "To generate it, first run:\n"
+                "  python scripts/train_yolo.py --skip-train "
+                "--weights models/helipad_yolov8s_preliminary.pt "
+                "--out-dir models/plots_preliminary"
+            )
 
     # ── summary table ─────────────────────────────────────────────────────────
     print("\n" + "=" * 68)

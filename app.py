@@ -4,6 +4,22 @@ Run:
     streamlit run app.py
 """
 
+# Windows: numpy / PyTorch / XGBoost each ship libiomp5md.dll → OMP Error #15.
+# Must be set before any of those libraries are imported.
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# Suppress "Tried to instantiate class '__path__._path'" log noise.
+# Streamlit's file-watcher inspects every sys.modules entry's __path__; when it
+# reaches torch.classes it triggers a C++ path object that cannot be instantiated
+# in Python.  Replacing __path__ with an empty list stops the inspection without
+# affecting any registered C++ classes (they are already loaded at this point).
+try:
+    import torch
+    torch.classes.__path__ = []  # type: ignore[assignment]
+except Exception:
+    pass
+
 import json
 import logging
 from pathlib import Path
@@ -27,6 +43,18 @@ from src.analysis import (
     match_by_proximity,
     match_rate_by_threshold,
     osm_completeness,
+)
+from src.hie import (
+    bbox_px_to_bounds,
+    bbox_px_to_latlon,
+    compute_offset_m,
+    detect_yolo,
+    draw_detection,
+    fetch_esri_chip,
+    fetch_naip_chip,
+    load_chip,
+    load_yolo_model,
+    YOLO_MODEL_PATH,
 )
 
 log = logging.getLogger(__name__)
@@ -566,8 +594,8 @@ st.markdown("# 🚁 SkyRoute — Helipad Intelligence Engine")
 st.divider()
 
 # ── outer tabs ─────────────────────────────────────────────────────────────────
-tab_problem, tab_lit, tab_market, tab_eda = st.tabs([
-    "📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE",
+tab_problem, tab_lit, tab_market, tab_eda, tab_inspector, tab_results = st.tabs([
+    "📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE", "🔍 Inspector", "📈 Results",
 ])
 
 
@@ -2868,3 +2896,712 @@ components.html(build_routing_html(faa_raw, osm_raw), height=650, scrolling=Fals
 
 st.divider()
 st.caption("SkyRoute HIE · Technion LBS Course 016833 · FAA ADDS-ArcGIS + OpenStreetMap")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 · HIE Inspector — live YOLO inference on NAIP / ESRI imagery
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── module-level helpers (must be outside the `with` block for caching) ───────
+
+_INSPECTOR_CSV    = DATA_DIR / "inspector_results.csv"
+_TEST_IMG_DIR     = DATA_DIR / "yolo_dataset" / "images" / "test"
+_TEST_LBL_DIR     = DATA_DIR / "yolo_dataset" / "labels" / "test"
+_FAA_NATIONAL_CSV = DATA_DIR / "faa_national.csv"
+
+_INSP_B_SOURCES: dict[str, str] = {
+    "FAA — NE US test set (747)": "faa_neus",
+    "FAA — CONUS (3 000+)":       "faa_national",
+    "OSM — NE US (1 500+)":       "osm_neus",
+}
+
+
+@st.cache_data
+def _load_insp_b_helipads(source_key: str) -> pd.DataFrame:
+    """Load helipad DataFrame for Live Inference overlay markers."""
+    if source_key == "faa_national":
+        if _FAA_NATIONAL_CSV.exists():
+            df = pd.read_csv(_FAA_NATIONAL_CSV)
+            return df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+        source_key = "faa_neus"   # fall back if national CSV not built yet
+    if source_key == "faa_neus":
+        p = DATA_DIR / "faa_adip_enriched.csv"
+        if not p.exists():
+            p = DATA_DIR / "faa_helipads_raw.csv"
+        if p.exists():
+            df = pd.read_csv(p)
+            return df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+    if source_key == "osm_neus":
+        p = DATA_DIR / "osm_helipads_raw.csv"
+        if p.exists():
+            df = pd.read_csv(p)
+            return df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+    return pd.DataFrame(columns=["lat", "lon", "name"])
+
+
+@st.cache_resource(show_spinner="Loading YOLO helipad detector…")
+def _load_inspector_model():
+    """Load the fine-tuned YOLO model once per session."""
+    try:
+        return load_yolo_model(YOLO_MODEL_PATH)
+    except FileNotFoundError:
+        return None
+
+
+@st.cache_data(show_spinner="Running YOLO on 747 test chips — first visit only, ~90 s…")
+def _get_test_results(model_path_str: str) -> pd.DataFrame:
+    """Run inference on all 747 test chips; persist results to inspector_results.csv."""
+    # Fast path: return cached CSV if it exists and looks complete
+    if _INSPECTOR_CSV.exists():
+        cached = pd.read_csv(_INSPECTOR_CSV)
+        if len(cached) == 747 and "category" in cached.columns:
+            return cached
+
+    model = load_yolo_model(Path(model_path_str))
+    faa   = pd.read_csv(DATA_DIR / "faa_adip_enriched.csv")
+    faa_map = {str(r.IDENT): r for _, r in faa.iterrows()}
+
+    rows = []
+    for chip_path in sorted(_TEST_IMG_DIR.glob("*.jpg")):
+        ident    = chip_path.stem
+        lbl_path = _TEST_LBL_DIR / f"{ident}.txt"
+
+        gt = 0
+        if lbl_path.exists():
+            gt = 1 if any(ln.startswith("0 ") for ln in lbl_path.read_text().splitlines()) else 0
+
+        image  = load_chip(chip_path)
+        result = detect_yolo(image, model)
+        pred   = 1 if result["detected"] and result["confidence"] >= 0.5 else 0
+
+        fr  = faa_map.get(ident)
+        lat = float(fr.lat)  if fr is not None else 0.0
+        lon = float(fr.lon)  if fr is not None else 0.0
+        name = str(fr.NAME) if fr is not None else ident
+
+        cat = {(1, 1): "TP", (0, 0): "TN", (0, 1): "FP", (1, 0): "FN"}[(gt, pred)]
+        rows.append({"ident": ident, "name": name, "lat": lat, "lon": lon,
+                     "gt": gt, "pred": pred, "detected": result["detected"],
+                     "confidence": round(result["confidence"], 4),
+                     "bbox_px": str(result["bbox_px"]) if result["bbox_px"] else "",
+                     "category": cat})
+
+    df = pd.DataFrame(rows)
+    _INSPECTOR_CSV.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(_INSPECTOR_CSV, index=False)
+    return df
+
+
+def _show_pil(target, img, caption: str = "") -> None:
+    """Display a PIL Image — falls back to use_column_width on older Streamlit."""
+    try:
+        target.image(img, caption=caption, use_container_width=True)
+    except TypeError:
+        target.image(img, caption=caption, use_column_width="always")
+
+
+def _safe_image(target, path: Path, caption: str = "") -> None:
+    """Display a plot PNG safely — handles corrupt files and Streamlit version differences."""
+    from PIL import Image as _PIL
+    try:
+        img = _PIL.open(str(path))
+        img.load()          # fully decode; raises on truncated/corrupt file
+    except Exception as exc:
+        target.warning(f"Could not load `{path.name}`: {exc}")
+        return
+    _show_pil(target, img, caption)
+
+
+# ── Inspector tab ─────────────────────────────────────────────────────────────
+from branca.element import Element as _BE   # used in both Mode A and Mode B maps
+
+# Fragment decorator — isolates Inspector reruns from the heavy EDA maps.
+# Falls back to a plain wrapper on Streamlit < 1.33.
+try:
+    _fragment = st.experimental_fragment
+except AttributeError:
+    def _fragment(fn):  # type: ignore[misc]
+        return fn
+
+
+@_fragment
+def _inspector_content() -> None:
+    """Render the full Inspector tab — runs as an isolated fragment."""
+    insp_model = _load_inspector_model()
+    if insp_model is None:
+        st.warning(
+            f"YOLO weights not found at `{YOLO_MODEL_PATH}`. "
+            "Run training first or copy `models/helipad_yolov8s.pt` to the project root."
+        )
+        return
+
+    insp_mode = st.radio(
+        "Mode",
+        ["🔬 Test Set Inspector", "📡 Live Inference"],
+        horizontal=True,
+        key="_insp_mode",
+        help=(
+            "Test Set Inspector: select a helipad from the dropdown — chip loads automatically. "
+            "Live Inference: pan/zoom the map freely; each move fetches a fresh 100 m chip and runs YOLO."
+        ),
+    )
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # MODE A — Test Set Inspector
+    # ══════════════════════════════════════════════════════════════════════════
+    if insp_mode == "🔬 Test Set Inspector":
+        st.caption(
+            "Select a helipad from the dropdown — chip loads automatically. "
+            "Green crosshair = FAA registry coordinate · Red box = YOLO detection."
+        )
+
+        test_results = _get_test_results(str(YOLO_MODEL_PATH))
+        cat_counts   = test_results.category.value_counts().to_dict()
+
+        ctrl_a, view_a = st.columns([1, 2], gap="medium")
+
+        with ctrl_a:
+            st.markdown("#### Navigate test set")
+            CAT_LABELS = {
+                "TP": f"✅ TP  ({cat_counts.get('TP', 0)})  helipad, detected",
+                "TN": f"⬜ TN  ({cat_counts.get('TN', 0)})  no helipad, not detected",
+                "FP": f"🔴 FP  ({cat_counts.get('FP', 0)})  no helipad, but detected",
+                "FN": f"🟡 FN  ({cat_counts.get('FN', 0)})  helipad, missed",
+            }
+            sel_cat = st.radio("Category", list(CAT_LABELS.keys()),
+                               format_func=lambda x: CAT_LABELS[x], key="_insp_a_cat")
+            cat_df  = test_results[test_results.category == sel_cat].sort_values("name")
+            opts_a  = [f"{r.ident} — {r.name}" for _, r in cat_df.iterrows()]
+            sel_opt = st.selectbox("Helipad", opts_a or ["(none)"], key="_insp_a_sel")
+
+            # Auto-jump: run inference whenever the selection changes
+            if opts_a and sel_opt and sel_opt != "(none)":
+                ident_a = sel_opt.split(" — ")[0]
+                if ident_a != st.session_state.get("_insp_a_ident"):
+                    row_a  = cat_df[cat_df.ident == ident_a].iloc[0]
+                    cp     = _TEST_IMG_DIR / f"{ident_a}.jpg"
+                    chip_a = load_chip(cp) if cp.exists() else None
+                    res_a  = detect_yolo(chip_a, insp_model) if chip_a else {
+                        "detected": False, "bbox_px": None, "cx": None, "cy": None,
+                        "confidence": 0.0, "method": "yolo_finetuned", "latency_s": 0.0,
+                    }
+                    st.session_state.update({
+                        "_insp_a_lat":    float(row_a.lat),
+                        "_insp_a_lon":    float(row_a.lon),
+                        "_insp_a_ver":    st.session_state.get("_insp_a_ver", 0) + 1,
+                        "_insp_a_ident":  ident_a,
+                        "_insp_a_chip":   chip_a,
+                        "_insp_a_result": res_a,
+                    })
+
+            st.divider()
+            conf_a = st.slider("Confidence threshold", 0.0, 1.0, 0.50, 0.05, key="_insp_a_thr")
+
+            res_a_now   = st.session_state.get("_insp_a_result")
+            ident_a_now = st.session_state.get("_insp_a_ident", "—")
+            if res_a_now:
+                st.divider()
+                st.markdown(f"**{ident_a_now}**")
+                if res_a_now["detected"] and res_a_now["confidence"] >= conf_a:
+                    st.success(f"✅ Detected   conf = {res_a_now['confidence']:.3f}")
+                    lat_a = st.session_state.get("_insp_a_lat", 0.0)
+                    lon_a = st.session_state.get("_insp_a_lon", 0.0)
+                    if res_a_now["bbox_px"]:
+                        dl, dlo = bbox_px_to_latlon(res_a_now["bbox_px"], lat_a, lon_a)
+                        st.caption(f"Registry offset: {compute_offset_m(lat_a, lon_a, dl, dlo):.1f} m")
+                else:
+                    st.info("No detection above threshold")
+
+        with view_a:
+            lat_a     = st.session_state.get("_insp_a_lat", 40.7503)
+            lon_a     = st.session_state.get("_insp_a_lon", -74.0025)
+            ver_a     = st.session_state.get("_insp_a_ver", 0)
+            res_a_now = st.session_state.get("_insp_a_result")
+
+            # NAIP chip (left) and reference map (right) — side by side
+            _chip_col_a, _map_col_a = st.columns([1, 1], gap="small")
+
+            chip_a_now = st.session_state.get("_insp_a_chip")
+            with _chip_col_a:
+                if chip_a_now and res_a_now:
+                    ann_a = draw_detection(chip_a_now, res_a_now,
+                                           source_label="NAIP (disk)", conf_threshold=conf_a)
+                    _show_pil(st, ann_a,
+                              caption=f"100 m × 100 m NAIP  |  conf={res_a_now['confidence']:.3f}")
+                else:
+                    st.info("Select a helipad from the dropdown to load the NAIP chip.")
+
+            with _map_col_a:
+                # Reference map — dark base by default, light map switchable
+                m_a = folium.Map(location=[lat_a, lon_a], zoom_start=16,
+                                 tiles="CartoDB dark_matter")
+                folium.TileLayer(tiles="OpenStreetMap", name="Light map",
+                                 overlay=False, control=True).add_to(m_a)
+                folium.CircleMarker(
+                    location=[lat_a, lon_a], radius=7,
+                    color="#4CAF50", fill=True, fill_color="#4CAF50", fill_opacity=0.9,
+                    tooltip=f"FAA registry: {st.session_state.get('_insp_a_ident', '')}",
+                ).add_to(m_a)
+                if res_a_now and res_a_now.get("bbox_px") and res_a_now["confidence"] >= conf_a:
+                    folium.Rectangle(
+                        bounds=bbox_px_to_bounds(res_a_now["bbox_px"], lat_a, lon_a),
+                        color="#ff3c3c", weight=3, fill=False,
+                        tooltip=f"YOLO bbox  conf={res_a_now['confidence']:.2f}",
+                    ).add_to(m_a)
+                folium.LayerControl(collapsed=False).add_to(m_a)
+                m_a.get_root().html.add_child(_BE("""<script>(function(){var n=0,iv=setInterval(function(){
+n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();
+if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);},400);})();</script>"""))
+                st_folium(m_a, key=f"insp_a_map_{ver_a}", width=None, height=310,
+                          returned_objects=[])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # MODE B — Live Inference
+    # ══════════════════════════════════════════════════════════════════════════
+    else:
+        st.caption(
+            "Select a helipad dataset — markers are shown on the map. "
+            "Click a marker or pan the map to fetch a 100 m × 100 m chip at that location and run YOLO. "
+            "Map zoom does not change the chip geometry — inference always uses the fixed 100 m window."
+        )
+
+        ctrl_b, view_b = st.columns([1, 2], gap="medium")
+
+        with ctrl_b:
+            st.markdown("#### Helipad overlays")
+            show_faa_b   = st.checkbox("FAA — NE US (747)",   value=True,  key="_insp_b_faa")
+            show_osm_b   = st.checkbox("OSM — NE US (1 500+)", value=True,  key="_insp_b_osm")
+            show_conus_b = st.checkbox("FAA — CONUS (3 000+)", value=False, key="_insp_b_conus",
+                                       help="Adds all CONUS helipads — may be slow to render")
+
+            st.markdown("#### Imagery")
+            imagery_b = st.radio(
+                "Imagery source",
+                ["NAIP only", "ESRI only", "NAIP + ESRI"],
+                help="NAIP = training domain  ·  ESRI = domain-shift comparison",
+                key="_insp_b_imagery",
+            )
+            auto_infer_b = st.checkbox(
+                "Auto-fetch on map move",
+                value=True,
+                key="_insp_b_auto",
+                help="Uncheck to navigate the map without triggering a fetch on every pan.",
+            )
+            conf_b = st.slider("Confidence threshold", 0.0, 1.0, 0.50, 0.05, key="_insp_b_thr")
+
+            st.divider()
+            lat_b_now = st.session_state.get("_insp_b_lat", 40.7503)
+            lon_b_now = st.session_state.get("_insp_b_lon", -74.0025)
+            st.caption(f"Centre: {lat_b_now:.4f}°N  {abs(lon_b_now):.4f}°W")
+            if st.button("Run Inference Here", use_container_width=True, key="_insp_b_run"):
+                st.session_state["_insp_b_force"] = True
+
+            res_b_naip = st.session_state.get("_insp_b_naip_result")
+            res_b_esri = st.session_state.get("_insp_b_esri_result")
+            if res_b_naip and imagery_b in ("NAIP only", "NAIP + ESRI"):
+                st.markdown("**NAIP**")
+                if res_b_naip["detected"] and res_b_naip["confidence"] >= conf_b:
+                    st.success(f"✅ Detected   conf = {res_b_naip['confidence']:.3f}")
+                    if res_b_naip["bbox_px"]:
+                        dl, dlo = bbox_px_to_latlon(res_b_naip["bbox_px"], lat_b_now, lon_b_now)
+                        st.caption(f"Centre offset: {compute_offset_m(lat_b_now, lon_b_now, dl, dlo):.1f} m")
+                else:
+                    st.info("No detection above threshold")
+            if res_b_esri and imagery_b in ("ESRI only", "NAIP + ESRI"):
+                st.markdown("**ESRI**")
+                if res_b_esri["detected"] and res_b_esri["confidence"] >= conf_b:
+                    st.success(f"✅ Detected   conf = {res_b_esri['confidence']:.3f}")
+                else:
+                    st.info("No detection above threshold")
+
+        with view_b:
+            ver_b = st.session_state.get("_insp_b_ver", 0)
+
+            # ESRI satellite as default base — no blank tiles at any zoom level
+            m_b = folium.Map(location=[lat_b_now, lon_b_now], zoom_start=15, tiles=None)
+            folium.TileLayer(
+                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="ESRI World Imagery", name="Satellite", control=False,
+            ).add_to(m_b)
+            folium.TileLayer(tiles="CartoDB dark_matter", name="Dark map",
+                             overlay=False, control=True).add_to(m_b)
+
+            # Helipad overlay layers — each dataset as a separate toggleable cluster
+            def _add_helipad_layer(m, df, layer_name, color):
+                if df.empty:
+                    return
+                _id_c = "IDENT" if "IDENT" in df.columns else None
+                _nm_c = ("NAME"  if "NAME"  in df.columns else
+                         "name"  if "name"  in df.columns else None)
+                _fg = MarkerCluster(name=layer_name, show=True).add_to(m)
+                for _, _hr in df.iterrows():
+                    _tid = str(_hr.get(_id_c, "") or "") if _id_c else ""
+                    _tnm = str(_hr.get(_nm_c, "") or "") if _nm_c else ""
+                    _tip = (_tid + "  " + _tnm).strip() or "helipad"
+                    folium.CircleMarker(
+                        location=[float(_hr["lat"]), float(_hr["lon"])],
+                        radius=4, color=color, fill=True, fill_color=color,
+                        fill_opacity=0.75, tooltip=_tip,
+                    ).add_to(_fg)
+
+            if show_faa_b:
+                _add_helipad_layer(m_b, _load_insp_b_helipads("faa_neus"),
+                                   "FAA NE US", "#1565C0")
+            if show_osm_b:
+                _add_helipad_layer(m_b, _load_insp_b_helipads("osm_neus"),
+                                   "OSM NE US", "#E65100")
+            if show_conus_b:
+                _add_helipad_layer(m_b, _load_insp_b_helipads("faa_national"),
+                                   "FAA CONUS", "#6A1B9A")
+
+            # Detection bbox overlays (NAIP = red, ESRI = orange)
+            if res_b_naip and res_b_naip.get("bbox_px") and res_b_naip["confidence"] >= conf_b:
+                folium.Rectangle(
+                    bounds=bbox_px_to_bounds(res_b_naip["bbox_px"], lat_b_now, lon_b_now),
+                    color="#ff3c3c", weight=3, fill=False,
+                    tooltip=f"YOLO NAIP  conf={res_b_naip['confidence']:.2f}",
+                ).add_to(m_b)
+            if res_b_esri and res_b_esri.get("bbox_px") and res_b_esri["confidence"] >= conf_b:
+                folium.Rectangle(
+                    bounds=bbox_px_to_bounds(res_b_esri["bbox_px"], lat_b_now, lon_b_now),
+                    color="#FF9800", weight=2, fill=False,
+                    tooltip=f"YOLO ESRI  conf={res_b_esri['confidence']:.2f}",
+                ).add_to(m_b)
+            folium.LayerControl(collapsed=False).add_to(m_b)
+            m_b.get_root().html.add_child(_BE("""<script>(function(){var n=0,iv=setInterval(function(){
+n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();
+if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);},400);})();</script>"""))
+
+            map_out_b = st_folium(m_b, key=f"insp_b_map_{ver_b}", width=None, height=390,
+                                  returned_objects=["center", "zoom", "last_object_clicked"])
+
+            # ── Determine inference target ────────────────────────────────────
+            force_b = st.session_state.get("_insp_b_force", False)
+            if force_b:
+                del st.session_state["_insp_b_force"]
+
+            new_lat_b, new_lng_b = lat_b_now, lon_b_now
+            if map_out_b:
+                if map_out_b.get("center"):
+                    new_lat_b = map_out_b["center"]["lat"]
+                    new_lng_b = map_out_b["center"]["lng"]
+                # Marker click overrides pan centre and forces inference
+                clicked_b = map_out_b.get("last_object_clicked")
+                if clicked_b and isinstance(clicked_b, dict) and "lat" in clicked_b:
+                    new_lat_b = float(clicked_b["lat"])
+                    new_lng_b = float(clicked_b.get("lng", new_lng_b))
+                    force_b   = True
+
+            last_b   = st.session_state.get("_insp_b_inferred_at", (None, None))
+            moved_b  = (last_b[0] is None
+                        or abs(new_lat_b - last_b[0]) > 0.0003
+                        or abs(new_lng_b - last_b[1]) > 0.0003)
+            do_infer = force_b or (auto_infer_b and moved_b)
+
+            if do_infer:
+                if imagery_b in ("NAIP only", "NAIP + ESRI"):
+                    with st.spinner("Fetching NAIP chip…"):
+                        cn = fetch_naip_chip(new_lat_b, new_lng_b)
+                    if cn:
+                        rn = detect_yolo(cn, insp_model)
+                        st.session_state["_insp_b_naip_chip"]   = cn
+                        st.session_state["_insp_b_naip_result"] = rn
+                if imagery_b in ("ESRI only", "NAIP + ESRI"):
+                    with st.spinner("Fetching ESRI chip…"):
+                        ce = fetch_esri_chip(new_lat_b, new_lng_b)
+                    if ce:
+                        re = detect_yolo(ce, insp_model)
+                        st.session_state["_insp_b_esri_chip"]   = ce
+                        st.session_state["_insp_b_esri_result"] = re
+                st.session_state["_insp_b_inferred_at"] = (new_lat_b, new_lng_b)
+                st.session_state["_insp_b_lat"]         = new_lat_b
+                st.session_state["_insp_b_lon"]         = new_lng_b
+
+            # Chip image panels
+            n_cols_b   = 2 if imagery_b == "NAIP + ESRI" else 1
+            img_cols_b = st.columns(n_cols_b)
+
+            if imagery_b in ("NAIP only", "NAIP + ESRI"):
+                cn = st.session_state.get("_insp_b_naip_chip")
+                rn = st.session_state.get("_insp_b_naip_result")
+                if cn and rn:
+                    _show_pil(img_cols_b[0],
+                              draw_detection(cn, rn, source_label="NAIP", conf_threshold=conf_b),
+                              caption=f"NAIP — training domain  |  conf={rn['confidence']:.3f}")
+                else:
+                    img_cols_b[0].caption("Click a helipad marker or pan to fetch a NAIP chip.")
+
+            if imagery_b in ("ESRI only", "NAIP + ESRI"):
+                ce = st.session_state.get("_insp_b_esri_chip")
+                re = st.session_state.get("_insp_b_esri_result")
+                ci = 1 if imagery_b == "NAIP + ESRI" else 0
+                if ce and re:
+                    _show_pil(img_cols_b[ci],
+                              draw_detection(ce, re, source_label="ESRI", conf_threshold=conf_b),
+                              caption=f"ESRI World Imagery — domain shift  |  conf={re['confidence']:.3f}")
+                else:
+                    img_cols_b[ci].caption("Click a helipad marker or pan to fetch an ESRI chip.")
+
+
+with tab_inspector:
+    st.markdown("### 🔍 HIE Inspector")
+    _inspector_content()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 · Results — training plots and 3-way comparison
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_results:
+    st.markdown("### 📈 Training Results & Model Comparison")
+    st.caption(
+        "Visual detection plots are generated by `python scripts/train_yolo.py --skip-train`. "
+        "XGBoost structured baseline is trained by `python scripts/train_xgboost.py`."
+    )
+
+    _PLOTS_DIR  = YOLO_MODEL_PATH.parent / "plots"
+    _PRELIM_DIR = YOLO_MODEL_PATH.parent / "plots_preliminary"
+    _XGB_DIR    = YOLO_MODEL_PATH.parent / "xgboost"
+
+    _CMP_DIR    = YOLO_MODEL_PATH.parent / "plots_comparison"
+
+    _res_tabs = st.tabs(["📊 XGBoost Structured Baseline", "🤖 YOLO Models Comparison"])
+
+    # ══ XGBoost tab (now first) ═════════════════════════════════════════════════
+    with _res_tabs[0]:
+        st.markdown(
+            "**XGBoost trained on ADIP structured features only — no imagery.**  \n"
+            "Label: `gt` — human-annotated visual presence from the 747 test chips.  \n"
+            "Answers: *how much helipad presence is predictable from structured data alone, without satellite imagery?*"
+        )
+
+        _xgb_metrics_path = _XGB_DIR / "metrics.json"
+        _xgb_fi_plot      = _XGB_DIR / "feature_importance.png"
+        _xgb_cmp_plot     = _XGB_DIR / "comparison.png"
+
+        if not _xgb_metrics_path.exists():
+            st.info(
+                "XGBoost model not trained yet.  \n"
+                "Run:  `python scripts/train_xgboost.py`"
+            )
+        else:
+            import json as _json
+            _xgb_m = _json.loads(_xgb_metrics_path.read_text(encoding="utf-8"))
+
+            # Metrics summary
+            _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+            _xgb_f1  = _xgb_m.get("f1", 0)
+            _maj_f1  = _xgb_m.get("majority_f1", 0)
+            _mc1.metric("Precision", f"{_xgb_m.get('precision', 0):.3f}")
+            _mc2.metric("Recall",    f"{_xgb_m.get('recall', 0):.3f}")
+            _mc3.metric("XGBoost F1", f"{_xgb_f1:.3f}",
+                        delta=f"{_xgb_f1 - _maj_f1:+.3f} vs majority baseline",
+                        delta_color="normal")
+            _mc4.metric("Majority-class baseline F1", f"{_maj_f1:.3f}",
+                        help="F1 of a classifier that predicts every helipad as visually present. "
+                             "High because ~58 % of the test set is gt=1. "
+                             "XGBoost must beat this to show real discriminative power.")
+            st.caption(
+                "**Interpretation:** XGBoost F1 ≈ majority baseline because ~58 % of helipads "
+                "are visually present (class imbalance inflates F1 for high-recall predictors). "
+                "More informative: Precision 0.74 > base rate 0.58 — the model IS discriminating. "
+                "The 0.16 gap vs YOLO F1 (0.89) represents helipads visually confirmable by imagery "
+                "but not predictable from registry data alone — exactly why the HIE visual pipeline exists."
+            )
+
+            st.divider()
+            _xp1, _xp2 = st.columns(2)
+            if _xgb_fi_plot.exists():
+                _xp1.markdown("**Feature Importance (gain)**")
+                _safe_image(_xp1, _xgb_fi_plot)
+            if _xgb_cmp_plot.exists():
+                _xp2.markdown("**XGBoost vs YOLOv8s**")
+                _safe_image(_xp2, _xgb_cmp_plot)
+
+            # ── position_age_days distribution ────────────────────────────────
+            st.divider()
+            st.markdown("**Position Age Distribution — days since ARP coordinates were last verified**")
+            try:
+                _faa_res = pd.read_csv(DATA_DIR / "faa_adip_enriched.csv")
+                _ref_ts  = pd.Timestamp("2026-06-01")
+                _pos_dt  = pd.to_datetime(_faa_res["position_date"], errors="coerce")
+                _pos_age = (_ref_ts - _pos_dt).dt.days.clip(lower=0).dropna()
+                _fig_pos = px.histogram(
+                    _pos_age,
+                    nbins=40,
+                    labels={"value": "Days since position verified", "count": "Helipads"},
+                    title="How stale are helipad coordinates? (NE US FAA, 747 records)",
+                    color_discrete_sequence=["#2563eb"],
+                    template="plotly_dark",
+                )
+                _fig_pos.add_vline(
+                    x=365, line_dash="dash", line_color="#f59e0b",
+                    annotation_text="1 yr", annotation_position="top right",
+                )
+                _fig_pos.add_vline(
+                    x=1095, line_dash="dash", line_color="#dc2626",
+                    annotation_text="3 yr", annotation_position="top right",
+                )
+                _fig_pos.update_layout(
+                    showlegend=False,
+                    xaxis_title="Days since position last verified",
+                    yaxis_title="Number of helipads",
+                    margin=dict(t=50, b=40),
+                )
+                _pct_stale = (_pos_age > 365).mean() * 100
+                _pct_very  = (_pos_age > 1095).mean() * 100
+                _pa1, _pa2, _pa3 = st.columns(3)
+                _pa1.metric("Median position age", f"{int(_pos_age.median())} days")
+                _pa2.metric("> 1 year old", f"{_pct_stale:.0f}% of helipads")
+                _pa3.metric("> 3 years old", f"{_pct_very:.0f}% of helipads")
+                try:
+                    st.plotly_chart(_fig_pos, use_container_width=True)
+                except TypeError:
+                    st.plotly_chart(_fig_pos, use_column_width=True)
+            except Exception as _e:
+                st.warning(f"Could not build position age chart: {_e}")
+
+            # ── has_wind feature spotlight ─────────────────────────────────────
+            st.divider()
+            st.markdown("#### Top feature spotlight — `has_wind`")
+            _ws_col, _ws_txt = st.columns([1, 2], gap="large")
+            with _ws_col:
+                st.image(
+                    "https://img.youtube.com/vi/ae1wdsoXSfQ/0.jpg",
+                    caption="Helipad windsock — click link below to watch",
+                    use_column_width="always",
+                )
+                st.markdown("[▶ Watch: Helipad Wind Indicator (YouTube)](https://youtu.be/ae1wdsoXSfQ?si=As7b0invRNb0BC-o)")
+            with _ws_txt:
+                st.markdown(
+                    "<p style='font-size:1.15rem; line-height:1.7'>"
+                    "A helipad wind indicator, commonly known as a <b>windsock</b> or wind cone, "
+                    "is a mandatory visual aid used to display real-time wind direction and velocity "
+                    "to helicopter pilots during approach, hover, and takeoff. Because helicopters "
+                    "must ideally land and take off facing directly into the wind to maintain "
+                    "stability, a functional wind indicator is critical for safety."
+                    "</p>"
+                    "<p style='font-size:1.15rem; line-height:1.7'>"
+                    "In the XGBoost model, <code>has_wind</code> is the <b>strongest single predictor</b> of "
+                    "visual helipad presence (gain = 5.2×). Helipads with registered wind "
+                    "equipment are actively operated and maintained — making them far more likely "
+                    "to have visible painted markings than unequipped pads."
+                    "</p>",
+                    unsafe_allow_html=True,
+                )
+
+    # ══ YOLO Models Comparison tab (now second) ════════════════════════════════
+    with _res_tabs[1]:
+        import json as _json
+
+        _MODEL_COLORS = {
+            "YOLOv8s":   "#2563eb",
+            "YOLOv11s":  "#16a34a",
+            "YOLOv11m":  "#9333ea",
+            "RT-DETR-L": "#dc2626",
+        }
+        _CMP_METRICS_PATH  = _CMP_DIR / "comparison_metrics.json"
+        _CMP_BAR_PATH      = _CMP_DIR / "comparison_bar.png"
+        _CMP_PR_PATH       = _CMP_DIR / "curve_pr.png"
+        _CMP_PREC_PATH     = _CMP_DIR / "curve_precision_conf.png"
+        _CMP_REC_PATH      = _CMP_DIR / "curve_recall_conf.png"
+
+        # ── Run instructions ──────────────────────────────────────────────────
+        if not _CMP_METRICS_PATH.exists():
+            st.info(
+                "Full 4-model comparison not yet generated.  \n"
+                "Run once (evaluates all models on 747 test chips, ~10 min):  \n"
+                "```\npython scripts/compare_models.py\n```"
+            )
+        else:
+            _cmp_m = _json.loads(_CMP_METRICS_PATH.read_text(encoding="utf-8"))
+            st.caption(
+                "All models evaluated on the same 747 held-out NE US test chips "
+                "at their individually optimal confidence threshold."
+            )
+
+            # ── Metric tiles ──────────────────────────────────────────────────
+            _model_names = list(_cmp_m.keys())
+            _tile_cols   = st.columns(len(_model_names))
+            for _ci, _mn in enumerate(_model_names):
+                _mm = _cmp_m[_mn]
+                _tile_cols[_ci].metric(
+                    _mn,
+                    f"F1 {_mm['f1']:.3f}",
+                    f"P {_mm['precision']:.2f}  R {_mm['recall']:.2f}",
+                )
+
+            st.divider()
+
+            # ── Radar + PR curve side by side ─────────────────────────────────
+            _CMP_RADAR_PATH = _CMP_DIR / "comparison_radar.png"
+            _radar_c1, _radar_c2 = st.columns([1, 1], gap="medium")
+            with _radar_c1:
+                st.markdown("**Radar — Precision / Recall / F1 / Accuracy**")
+                if _CMP_RADAR_PATH.exists():
+                    _safe_image(st, _CMP_RADAR_PATH)
+                else:
+                    st.caption("Run `python scripts/compare_models.py --plots-only`")
+            with _radar_c2:
+                st.markdown("**Precision–Recall curve**")
+                if _CMP_PR_PATH.exists():
+                    _safe_image(st, _CMP_PR_PATH)
+                else:
+                    st.caption("Run `python scripts/compare_models.py --plots-only`")
+
+            st.markdown(
+                "> **YOLO11m** is the production model — highest precision (0.931) and fewest false "
+                "positives (FP = 27), directing the routing engine only to real, confirmable helipads. "
+                "Choose it whenever a wrong detection creates a safety or trust liability.\n>\n"
+                "> **YOLO11s** is the discovery model — highest recall (0.866), finding 8 more real "
+                "helipads than YOLO11m (TP = 375 vs 367) at the cost of 11 extra false positives. "
+                "Use it for initial registry sweeps where coverage matters more than confidence.\n>\n"
+                "> **YOLOv8s** and **RT-DETR-L** both fall behind the YOLO11 family. RT-DETR-L confirms "
+                "that transformer-based detectors can learn the NAIP aerial domain, but offers no "
+                "practical advantage over YOLO11 at this dataset size."
+            )
+
+        # ── Confidence-sweep plots ────────────────────────────────────────────
+        st.divider()
+        st.markdown("**Confidence Threshold Analysis — all models**")
+        _have_curves = _CMP_PREC_PATH.exists() and _CMP_REC_PATH.exists()
+        if _have_curves:
+            _cc2, _cc3 = st.columns(2, gap="small")
+            _cc2.markdown("**Precision vs Confidence**")
+            _safe_image(_cc2, _CMP_PREC_PATH)
+            _cc3.markdown("**Recall vs Confidence**")
+            _safe_image(_cc3, _CMP_REC_PATH)
+            st.caption(
+                "Diamond markers (◆) show each model's individually optimal confidence threshold. "
+                "Dashed line = median optimal threshold across models. "
+                "Note: raw confidence scores are NOT comparable across architectures — each model "
+                "uses a different internal scale. Calibrate thresholds independently per model."
+            )
+        else:
+            st.info("Run `python scripts/compare_models.py` to generate confidence-sweep plots.")
+
+        # ── Individual model plots (consistent style, all from curve data) ──────
+        st.divider()
+        st.markdown("**Individual Model Plots**")
+
+        def _ind_safe(n): return n.lower().replace("-", "").replace(" ", "_")
+
+        _IND_CURVE_PLOTS = [
+            ("pr.png",             "Precision–Recall"),
+            ("f1_conf.png",        "F1 vs Confidence"),
+            ("precision_conf.png", "Precision vs Confidence"),
+            ("recall_conf.png",    "Recall vs Confidence"),
+            ("confusion.png",      "Confusion Matrix"),
+        ]
+        for _mn in (_cmp_m or {}).keys():
+            _ind_dir = _CMP_DIR / f"individual_{_ind_safe(_mn)}"
+            _available = [(f, t) for f, t in _IND_CURVE_PLOTS if (_ind_dir / f).exists()]
+            if not _available:
+                continue
+            with st.expander(f"{_mn}", expanded=False):
+                for _pi in range(0, len(_available), 2):
+                    _ec = st.columns(2)
+                    for _ej, (_ef, _et) in enumerate(_available[_pi:_pi+2]):
+                        _ec[_ej].markdown(f"**{_et}**")
+                        _safe_image(_ec[_ej], _ind_dir / _ef)

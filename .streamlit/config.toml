@@ -1,0 +1,4 @@
+[server]
+# "watchdog" is the fastest watcher (inotify/FSEvents).
+# The torch.classes path error is suppressed in app.py instead.
+fileWatcherType = "watchdog"

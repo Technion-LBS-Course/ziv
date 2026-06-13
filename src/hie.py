@@ -22,6 +22,7 @@ Result dict schema
   }
 """
 
+import io
 import logging
 import math
 import time
@@ -30,7 +31,8 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PIL import Image
+import requests
+from PIL import Image, ImageDraw
 
 log = logging.getLogger(__name__)
 
@@ -647,3 +649,231 @@ def compute_offset_m(
     dlon = math.radians(det_lon - ref_lon)
     a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     return R * 2 * math.asin(math.sqrt(a))
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Live imagery fetch — NAIP and ESRI World Imagery
+# ────────────────────────────────────────────────────────────────────────────
+
+_NAIP_URL = (
+    "https://gis.apfo.usda.gov/arcgis/rest/services"
+    "/NAIP/USDA_CONUS_PRIME/ImageServer/exportImage"
+)
+_ESRI_URL = (
+    "https://services.arcgisonline.com/ArcGIS/rest/services"
+    "/World_Imagery/MapServer/export"
+)
+_HEADERS = {"User-Agent": "SkyRoute/1.0"}
+
+
+def _chip_bbox_deg(
+    lat: float,
+    lon: float,
+    window_m: float = NAIP_WINDOW_M,
+) -> tuple[float, float, float, float]:
+    """WGS84 bounding box (xmin, ymin, xmax, ymax) centred on lat/lon."""
+    half = window_m / 2.0
+    dlat = half / 111_320.0
+    dlon = half / (111_320.0 * math.cos(math.radians(lat)))
+    return lon - dlon, lat - dlat, lon + dlon, lat + dlat
+
+
+def fetch_naip_chip(
+    lat: float,
+    lon: float,
+    window_m: float = NAIP_WINDOW_M,
+    img_px: int = IMG_PX,
+    timeout: int = 15,
+) -> Optional[Image.Image]:
+    """Fetch a live NAIP chip from USDA APFO ImageServer.
+
+    Same endpoint and geometry as build_yolo_dataset.py.  Returns None on
+    network error or if the coordinate is outside CONUS.
+
+    Args:
+        lat: Centre latitude (decimal degrees).
+        lon: Centre longitude (decimal degrees).
+        window_m: Ground window side length in metres (default 100 m).
+        img_px: Output image size in pixels (default 640).
+        timeout: HTTP request timeout in seconds.
+
+    Returns:
+        PIL RGB Image or None on failure.
+    """
+    xmin, ymin, xmax, ymax = _chip_bbox_deg(lat, lon, window_m)
+    params = {
+        "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+        "bboxSR": "4326",
+        "size": f"{img_px},{img_px}",
+        "imageSR": "4326",
+        "format": "jpg",
+        "f": "image",
+    }
+    try:
+        resp = requests.get(_NAIP_URL, params=params, timeout=timeout, headers=_HEADERS)
+        ct = resp.headers.get("Content-Type", "")
+        if resp.status_code == 200 and ct.startswith("image"):
+            return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        log.warning("NAIP fetch: HTTP %s, Content-Type=%s", resp.status_code, ct)
+    except Exception as exc:
+        log.warning("NAIP fetch failed (%.4f, %.4f): %s", lat, lon, exc)
+    return None
+
+
+def fetch_esri_chip(
+    lat: float,
+    lon: float,
+    window_m: float = NAIP_WINDOW_M,
+    img_px: int = IMG_PX,
+    timeout: int = 8,
+) -> Optional[Image.Image]:
+    """Fetch a live ESRI World Imagery chip by stitching XYZ tiles at zoom 18.
+
+    Uses the same CDN-backed tile URL as the Folium map — far more reliable
+    than the MapServer/export endpoint which times out and returns HTTP 500.
+
+    Args:
+        lat: Centre latitude.
+        lon: Centre longitude.
+        window_m: Ground window side length in metres.
+        img_px: Output image size in pixels.
+        timeout: HTTP timeout per tile request in seconds.
+
+    Returns:
+        PIL RGB Image or None on failure.
+    """
+    import math as _math
+
+    ZOOM = 18
+    TILE_BASE = (
+        "https://server.arcgisonline.com/ArcGIS/rest/services"
+        "/World_Imagery/MapServer/tile"
+    )
+
+    # World-pixel coordinates of the centre point at zoom 18
+    n       = 2 ** ZOOM
+    lat_rad = _math.radians(lat)
+    wpx = (lon + 180.0) / 360.0 * n * 256
+    wpy = (1.0 - _math.log(_math.tan(lat_rad) + 1.0 / _math.cos(lat_rad)) / _math.pi) / 2.0 * n * 256
+
+    # Which tile contains the centre, and pixel offset within that tile
+    tile_x = int(wpx / 256)
+    tile_y = int(wpy / 256)
+    sub_x  = int(wpx % 256)
+    sub_y  = int(wpy % 256)
+
+    # Ground resolution (m per pixel) at this zoom and latitude
+    gres = 156543.03392 * _math.cos(lat_rad) / n   # ~0.46 m/px at lat 40° zoom 18
+
+    # Fetch 3×3 tile grid and stitch into a 768×768 mosaic
+    mosaic = Image.new("RGB", (768, 768))
+    any_ok = False
+    for dy in range(-1, 2):
+        for dx in range(-1, 2):
+            tx, ty = tile_x + dx, tile_y + dy
+            if tx < 0 or ty < 0 or tx >= n or ty >= n:
+                continue
+            url = f"{TILE_BASE}/{ZOOM}/{ty}/{tx}"
+            try:
+                resp = requests.get(url, timeout=timeout, headers=_HEADERS)
+                if resp.status_code == 200:
+                    tile_img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                    mosaic.paste(tile_img, ((dx + 1) * 256, (dy + 1) * 256))
+                    any_ok = True
+            except Exception as exc:
+                log.warning("ESRI tile %d/%d/%d failed: %s", ZOOM, ty, tx, exc)
+
+    if not any_ok:
+        log.warning("ESRI fetch: no tiles retrieved for (%.4f, %.4f)", lat, lon)
+        return None
+
+    # Centre of our point in the mosaic, then crop to window_m × window_m
+    cx_m  = 256 + sub_x
+    cy_m  = 256 + sub_y
+    half  = max(1, int(window_m / gres / 2))
+    x0, y0 = max(0, cx_m - half), max(0, cy_m - half)
+    x1, y1 = min(768, cx_m + half), min(768, cy_m + half)
+
+    chip = mosaic.crop((x0, y0, x1, y1))
+    return chip.resize((img_px, img_px), Image.LANCZOS)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Detection visualisation
+# ────────────────────────────────────────────────────────────────────────────
+
+def draw_detection(
+    image: Image.Image,
+    result: dict,
+    source_label: str = "",
+    conf_threshold: float = 0.0,
+) -> Image.Image:
+    """Draw bbox and confidence label on a copy of the image.
+
+    Also draws a green crosshair at the chip centre (registry coordinate).
+
+    Args:
+        image: PIL RGB Image (chip).
+        result: Detection result dict from any detect_* function.
+        source_label: Short string prepended to the confidence label (e.g. "NAIP").
+        conf_threshold: Minimum confidence to draw the bbox.
+
+    Returns:
+        Annotated PIL RGB Image copy.
+    """
+    img = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    # Green crosshair at chip centre = registry coordinate
+    cx0, cy0 = IMG_PX // 2, IMG_PX // 2
+    r = 10
+    draw.line([(cx0 - r, cy0), (cx0 + r, cy0)], fill=(50, 220, 50), width=2)
+    draw.line([(cx0, cy0 - r), (cx0, cy0 + r)], fill=(50, 220, 50), width=2)
+
+    if result.get("detected") and result.get("bbox_px") and result["confidence"] >= conf_threshold:
+        x1, y1, x2, y2 = result["bbox_px"]
+        # Red bounding box
+        draw.rectangle([x1, y1, x2, y2], outline=(255, 60, 60), width=3)
+        # Confidence label with filled background
+        label = f"{source_label + ' ' if source_label else ''}conf={result['confidence']:.2f}"
+        tx, ty = max(0, x1), max(0, y1 - 16)
+        draw.rectangle([tx, ty, tx + len(label) * 7 + 4, ty + 15], fill=(255, 60, 60))
+        draw.text((tx + 2, ty + 1), label, fill=(255, 255, 255))
+    else:
+        draw.text((6, 6), "No detection", fill=(255, 80, 80))
+
+    return img
+
+
+def bbox_px_to_bounds(
+    bbox_px: list[int],
+    chip_lat: float,
+    chip_lon: float,
+    window_m: float = NAIP_WINDOW_M,
+    img_px: int = IMG_PX,
+) -> list[list[float]]:
+    """Convert pixel bbox to Folium-style bounds [[lat_sw, lon_sw], [lat_ne, lon_ne]].
+
+    Args:
+        bbox_px: [x1, y1, x2, y2] pixel coordinates.
+        chip_lat: Chip centre latitude.
+        chip_lon: Chip centre longitude.
+        window_m: Ground window side length in metres.
+        img_px: Image size in pixels.
+
+    Returns:
+        [[lat_min, lon_min], [lat_max, lon_max]] suitable for folium.Rectangle.
+    """
+    gsd = window_m / img_px
+    x1, y1, x2, y2 = bbox_px
+
+    def _px(px: int, py: int) -> tuple[float, float]:
+        dx_m = (px - img_px / 2) * gsd
+        dy_m = (img_px / 2 - py) * gsd
+        la = chip_lat + dy_m / 111_320.0
+        lo = chip_lon + dx_m / (111_320.0 * math.cos(math.radians(chip_lat)))
+        return la, lo
+
+    la1, lo1 = _px(x1, y1)
+    la2, lo2 = _px(x2, y2)
+    return [[min(la1, la2), min(lo1, lo2)], [max(la1, la2), max(lo1, lo2)]]
