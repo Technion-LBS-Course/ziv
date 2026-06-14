@@ -19,27 +19,15 @@
 
 ---
 
-### F-02 · OurAirports Data Loader
-**File:** `src/data.py` — `load_ourairports_data(path)`
-
-| | |
-|---|---|
-| Input | `data/ourairports_raw.csv` (filtered to `type == 'heliport'`) |
-| Output | DataFrame with standard SkyRoute schema |
-| Key logic | Rename OurAirports columns to standard schema, derive `operational` label from `scheduled_service` + `status` fields |
-| Done when | Returns clean DataFrame; `source` column set to `"ourairports"` for every row |
-
----
-
-### F-03 · Helipad Merge & Deduplication
+### F-02 · Helipad Merge & Deduplication
 **File:** `src/data.py` — `merge_helipad_sources(*dfs)`
 
 | | |
 |---|---|
-| Input | 2–3 DataFrames (FAA, OurAirports, optionally OSM) |
+| Input | 2 DataFrames (FAA, OSM) |
 | Output | Single deduplicated DataFrame; `source_agreement_count` column populated |
-| Key logic | Cluster records within 100 m radius (haversine); keep record with highest `source_agreement_count`; tie-break: FAA > OurAirports > OSM |
-| Done when | No two records are within 100 m of each other; `source_agreement_count` in range [1, 3] |
+| Key logic | Cluster records within 100 m radius (haversine); keep record with highest `source_agreement_count`; tie-break: FAA > OSM |
+| Done when | No two records are within 100 m of each other; `source_agreement_count` in range [1, 2] |
 
 ---
 
@@ -192,7 +180,7 @@ Every loader in `src/data.py` must output these columns in this order:
 
 | Column | Type | Notes |
 |---|---|---|
-| `source` | str | `"faa"` / `"ourairports"` / `"osm"` |
+| `source` | str | `"faa"` / `"osm"` |
 | `skyroute_id` | str | UUID assigned at merge time |
 | `name` | str | Raw name from source |
 | `lat` | float | WGS-84 |

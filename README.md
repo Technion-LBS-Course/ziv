@@ -16,7 +16,7 @@ Business travelers and frequent flyers lose hours daily to urban traffic congest
 
 Existing solutions are siloed: Blade books helicopters but lacks multimodal integration; Google Maps offers ground routing but ignores AAM entirely; Joby and Volocopter serve their own operators only. There is no operator-agnostic, business-grade platform that fuses all modes.
 
-Beyond routing, the underlying infrastructure data is broken. Public helipad databases (FAA, OurAirports, OSM) are notoriously inconsistent — outdated coordinates, decommissioned pads listed as active, missing usability metadata. Feeding this raw data into a routing engine creates liability and trust failures.
+Beyond routing, the underlying infrastructure data is broken. Public helipad databases (FAA, OSM) are notoriously inconsistent — outdated coordinates, decommissioned pads listed as active, missing usability metadata. Feeding this raw data into a routing engine creates liability and trust failures.
 
 **SkyRoute solves both problems:** the routing layer and the data quality layer beneath it.
 
@@ -40,7 +40,7 @@ Beyond routing, the underlying infrastructure data is broken. Public helipad dat
 
 ## Helipad Intelligence Engine (HIE) — ML Architecture
 
-Raw helipad databases (FAA, OurAirports, OSM) are incomplete, stale, and contain military or decommissioned pads. HIE is a **3-phase ML pipeline** that validates every candidate pad before it enters the routing engine.
+Raw helipad databases (FAA, OSM) are incomplete, stale, and contain military or decommissioned pads. HIE is a **3-phase ML pipeline** that validates every candidate pad before it enters the routing engine.
 
 ```
 Raw Input              Phase 1                       Phase 2                 Phase 3 ⭐             Output
@@ -111,10 +111,6 @@ For validated FAA helipads, the ADIP Airport Master Record provides TLOF/FATO di
 - **Key columns:** `lat`, `lon`, `name`, `faa`, `ele`, `surface`, `lit`, `operator`, `addr:state`
 - **License:** ODbL
 - **Known gaps:** ~24% have `faa=<IDENT>` tag; most lack `ele`, `surface`, and `lit`; coordinates are community-contributed and may drift
-
-### OurAirports (optional third source)
-- **Download:** `curl -o data/ourairports_raw.csv https://ourairports.com/data/airports.csv` then filter `type == heliport`
-- **License:** CC0
 
 ### USDA NAIP — National Agriculture Imagery Program (M3 imagery)
 - **Source:** USDA Farm Service Agency, served via APFO ImageServer
@@ -268,7 +264,6 @@ fetch_adip_details.py    →  data/faa_adip_enriched.csv
 
 src/data.py              →  load_faa_data()           (auto-selects enriched if present)
                             load_osm_data()
-                            load_ourairports_data()
                             merge_helipad_sources()   (concat; spatial dedup in M3)
 
 src/analysis.py          →  haversine_matrix()
