@@ -71,10 +71,7 @@ The final `hie_score` (0–100) blends all three phases — it is **not** a hard
 
 ### Phase 1 — Visual Validation (YOLO11m fine-tuned cascade)
 
-USDA NAIP imagery chips (100 m × 100 m, 640×640 px, 0.156 m/px) are fetched for each candidate coordinate from the USDA APFO ImageServer. A two-tier production cascade validates each pad:
-
-- **Tier 1 — Classical CV** (`detect_classical`): OpenCV normalised cross-correlation against H-shape templates at 3 scales × 2 rotations × 2 colour variants. Accept if confidence ≥ 0.75; else fall through to Tier 2.
-- **Tier 2 — YOLO11m fine-tuned** (`detect_yolo`): Domain-specific model trained on 2,584 NAIP chips from across the continental US. Detects H-markers and rooftop pads that lack an explicit H marking. **YOLO11m is the production model** (P=0.931, FP=27); YOLO11s is available for discovery workflows that prioritise recall (R=0.866, TP=375).
+USDA NAIP imagery chips (100 m × 100 m, 640×640 px, 0.156 m/px) are fetched for each candidate coordinate from the USDA APFO ImageServer. **YOLO11m fine-tuned** (`detect_yolo`) is the production model — domain-specific, trained on 2,584 NAIP chips from across the continental US. Detects H-markers and rooftop pads that lack an explicit H marking. **YOLO11m** (P=0.931, FP=27) is preferred for safety-critical routing; YOLO11s is available for discovery workflows that prioritise recall (R=0.866, TP=375).
 
 The detected bounding-box centroid is back-projected to geographic coordinates and compared against the registry coordinate to produce `offset_m`. Records where no helipad is detected, or where offset exceeds a design-class threshold, are flagged for manual review.
 
