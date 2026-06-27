@@ -14,7 +14,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install dependencies (Python 3.11+)
 pip install -r requirements.txt
 
-# Run Streamlit dashboard
+# Run Streamlit dashboard (preferred — loads .env and checks API keys first)
+.\run.bat        # Windows CMD
+.\run.ps1        # PowerShell (may need: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass)
+.\run.bat --check    # verify .env keys without starting the app
+
+# Run directly (skips .env check)
 streamlit run app.py
 
 # Run annotation review tool (separate Streamlit app)
@@ -137,13 +142,14 @@ ziv/
 ├── README.md               ← Project overview, persona, ML formulation
 ├── Worklog.md              ← Session-by-session log of decisions and issues
 ├── requirements.txt        ← Pinned dependencies
-├── app.py                  ← Streamlit dashboard (~3600 lines)
+├── app.py                  ← Streamlit dashboard (~4000 lines)
 ├── src/
 │   ├── __init__.py
 │   ├── data.py             ← Ingestion, cleaning, schema normalisation
 │   ├── analysis.py         ← Cross-source matching, consistency, completeness
 │   ├── notam.py            ← FAA NOTAM API + Aviation Weather Center METAR/TAF (M4)
-│   └── weather.py          ← RainViewer radar frames, tile URLs, route precipitation check (M4)
+│   ├── weather.py          ← NWS MRMS radar WMS layer + per-waypoint precipitation sampling (M4)
+│   └── agent.py            ← LLM Route Assistant: routing, booking, geocoding, Mapillary (M4)
 ├── scripts/
 │   ├── fetch_ny_data.py       ← Download FAA (ArcGIS) + OSM (Overpass) for NE US
 │   ├── fetch_adip_details.py  ← Enrich FAA records with ADIP Airport Master Record
@@ -372,7 +378,7 @@ Name similarity strips OSM "Helipad"/"Heliport" suffixes before comparison *unle
 ### Tab structure
 
 ```
-st.tabs(["📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE", "🔍 Inspector", "📈 Results"])
+st.tabs(["📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE", "🔍 Inspector", "📈 Results", "💬 Route Assistant"])
 ```
 
 **Tab 1 — Problem**
@@ -416,6 +422,18 @@ st.tabs(["📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE", "�
 - Two sub-tabs: `["📊 XGBoost Structured Baseline", "🤖 YOLO Models Comparison"]`
 - XGBoost sub-tab: F1 lift over majority, feature importance bar chart, has_wind spotlight (windsock image + YouTube link), position_age_days distribution chart, full classification report
 - YOLO sub-tab: 4 metric KPI tiles → radar chart + PR curve side-by-side → action caption (YOLO11m = production / YOLO11s = discovery) → P vs conf + R vs conf → individual model expanders (each with 5 plots)
+
+**Tab 7 — Route Assistant (💬)**
+- Isolated via `@st.experimental_fragment`
+- Natural language chat powered by Groq/Llama-3.3-70b-versatile (`src/agent.py`)
+- Intent detection: route planning, booking confirmation, helipad info queries
+- Geocoding: TomTom Fuzzy Search → LLM address extraction → Nominatim (handles business names and floor-level addresses)
+- After route planning, user confirms with "yes" / "book it" / "book it now"
+- **Booking flow** per leg:
+  - *Helicopter leg:* ADIP helipad info (status, ownership, METAR, coordination note decoded from raw FAA remarks via LLM), Mapillary street-level thumbnail
+  - *Rideshare leg:* simulated Uber/Waymo fare + deeplinks, Mapillary thumbnails at pickup and dropoff
+  - *Walk leg (< 0.5 km):* distance + walk-time card, Mapillary thumbnail at start
+- **Mapillary thumbnails:** image ID found server-side (`find_nearest_mapillary_image`), `thumb_2048_url` fetched via `get_mapillary_thumb_url`, rendered as `<img>` tag — no JS viewer, no CDN library, no WebGL, no CORS issues
 
 ### Caching strategy
 
@@ -470,7 +488,18 @@ This pattern is applied to the main Folium map (`build_map()` return), the densi
 
 ### Routing simulator (`build_routing_html`)
 
-Builds an HTML/JS page injected via `components.html()`. Layer-aware: `getAllHelipads()` calls `map.hasLayer(ly)` for each overlay layer and skips unchecked ones — routing only uses visible helipad layers. Four overlays: FAA helipads, OSM helipads, Business POIs, Executive Residences. `HeliControl` and `MMControl` buttons are positioned `bottomright` to avoid overlap with the layer control.
+Builds an HTML/JS page injected via `components.html()`. Layer-aware: `getAllHelipads()` calls `map.hasLayer(ly)` for each overlay layer and skips unchecked ones — routing only uses visible helipad layers. Seven overlays: FAA helipads, OSM helipads, HIE Validated, Business POIs, Executive Residences, TFRs, Precipitation radar. `HeliControl` and `MMControl` buttons are positioned `bottomright` to avoid overlap with the layer control.
+
+Key JS routing functions (current as of m4.15):
+
+| Function | Description |
+|----------|-------------|
+| `estimateDriveLeg(lat1,lng1,lat2,lng2)` | Instant drive estimate: haversine × 1.35 road factor, 25 km/h urban speed — replaces OSRM for short helipad approach legs |
+| `osrmRoute(lat1,lng1,lat2,lng2,profile)` | TomTom → OSRM → haversine fallback chain; used only for the full origin→destination comparison route |
+| `getAllHelipads()` | Returns flat array of `{lat,lon,name}` from all visible layers; result cached in `_helipadCache`, invalidated on `layeradd`/`layerremove` |
+| `nearestHelipad(lat,lng,pts)` | O(N) haversine scan; called twice per route |
+| `findRoute(start,end,allPts)` | Dijkstra TFR-avoiding arc; graph bounded to ±1.5°/2.5° corridor; skipped when direct line is TFR-free |
+| `computeMultiModal(pA,pB)` | Orchestrator: sync helipad selection → browser yield → 1 OSRM call → draw + table |
 
 ### ADIP hotlink in popups
 
@@ -574,131 +603,71 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 
 ---
 
-## M4 Plan — NOTAM Airspace Avoidance + RainViewer Precipitation
+## M4 Status — IN PROGRESS (2026-06-27)
 
-**Do NOT start until M3 is submitted (23 Jun 2026).**
+### Completed deliverables
 
-### `src/notam.py` — NOTAM + Aviation Weather
+| Item | File | Notes |
+|------|------|-------|
+| OSM-only visual validation | `scripts/validate_osm_only.py` | 1,663 OSM-only records → 1,174 confirmed (70.6%); `data/osm_validated.csv` |
+| TFR live feed | `src/notam.py` | FAA GeoServer WFS (same backend as tfr.faa.gov/tfr3/); ~230 live TFRs + stadium points; 15-min stale cache |
+| METAR | `src/notam.py` | Aviation Weather Center, no key; 5-min in-process cache |
+| NWS radar layer | `src/weather.py` | WMS `conus_bref_qcd` (MRMS); mode-specific thresholds |
+| Precipitation sampling | `src/weather.py` | `sample_precipitation_at_latlon()` — 3×3 WMS GetMap, red channel 0–255 |
+| TFR map overlay | `app.py` | `folium.Polygon` on main map + GeoJSON-injected layer in routing simulator |
+| NWS radar overlay | `app.py` | `folium.WmsTileLayer` on all Folium maps; always-on |
+| METAR badge in popups | `app.py` | Flight category colour-coded in FAA marker popup |
+| Validated OSM routing pool | `app.py` | Inspector Mode C; `validatedLayer` in routing simulator |
+| TFR arc routing | `app.py` | Dijkstra multi-hop avoidance (`findRoute`) when TFR layer ON; arcs via intermediate helipads |
+| TomTom traffic-aware routing | `app.py` | TomTom Routing API v1 → OSRM fallback; daily quota guard |
+| Mapbox traffic basemap | `app.py` | `traffic-day-v2` style as switchable basemap in routing simulator + Folium map; replaces deprecated v4 raster overlay |
+| Routing performance | `app.py` | 3 OSRM calls → 1 (helipad legs replaced by `estimateDriveLeg`); Dijkstra corridor-bounded; `getAllHelipads()` cached; browser yield before sync work |
+| Launcher scripts | `run.ps1`, `run.bat` | Load `.env`, report key status — safe to commit |
+| **LLM Route Assistant** | `src/agent.py` | Groq/Llama-3.3-70b; intent detection (route/book/info); TomTom Fuzzy Search + LLM address extraction + Nominatim geocoding cascade |
+| **Booking flow** | `src/agent.py` | Per-leg: helicopter (ADIP lookup + METAR), rideshare (Uber/Waymo deeplinks), walk (< 0.5 km threshold) |
+| **ADIP remarks decoding** | `src/agent.py` | `_decode_adip_remarks()` via Groq/Llama — cryptic FAA remarks → plain English coordination notes |
+| **Mapillary street-level imagery** | `src/agent.py` + `app.py` | Server-side ID lookup (`find_nearest_mapillary_image`) + thumbnail fetch (`get_mapillary_thumb_url`); rendered as `<img>` — no JS viewer, no CORS |
 
-FAA Digital NOTAM API (`api.faa.gov`) requires `FAA_API_KEY` (already in `.env.example`). Header: `X-API-Key: <key>`.
+### Non-obvious decisions made during M4
 
-```
-GET https://api.faa.gov/notamSearch/api/v1/notams?icaoLocation=NK39&pageSize=100
-GET https://api.faa.gov/notamSearch/api/v1/notams?locationLongitude=<lon>&locationLatitude=<lat>&locationRadius=<nm>
-```
+**Mapbox traffic basemap (not overlay):** Mapbox deprecated the v4 raster tile endpoint (`/v4/mapbox.mapbox-traffic-v1/{z}/{x}/{y}.png`) — it renders orange road outlines without congestion colors. The correct approach is to use the `traffic-day-v2` Mapbox style as a switchable **basemap** (not an overlay), using the styles tile URL: `/styles/v1/mapbox/traffic-day-v2/tiles/256/{z}/{x}/{y}?access_token=...`. In the routing simulator this is added to the basemap radio group (`L.control.layers({'Street Map': osmDay, 'Satellite': esriSat, 'Traffic (Mapbox)': mapboxTrafficLayer}, ...)`). The TomTom Traffic Flow Tiles product (separate from the Routing API) requires paid activation on the free key — it was replaced entirely by Mapbox.
 
-- FAA helipad IDENTs (e.g., `NK39`) are NOT always 4-letter ICAO codes. The API accepts 2–4-char FAA IDENTs directly via `icaoLocation`.
-- For the NOTAM map layer: query by radius (25 nm) centred on each NE US cluster; merge and deduplicate by `notamId`.
-- TFR NOTAMs (type `D`) have polygon geometry in `geometry.coordinates` — render as `folium.Polygon` with red outline.
-- Point NOTAMs (no geometry) render as red circle markers at the referenced fix coordinate.
+**Mapillary street-level imagery — no JS viewer:** The `mapillary-js@4` Viewer library requires WebGL and makes internal API calls that fail in Streamlit's sandboxed iframe (`sandbox="allow-scripts"` without `allow-same-origin`). The solution: (1) find the nearest image ID server-side via `find_nearest_mapillary_image()` using `Authorization: OAuth {token}` header (no CORS restriction in Python), (2) fetch the CDN JPEG thumbnail URL via `get_mapillary_thumb_url(image_id)` using `graph.mapillary.com/{id}?fields=thumb_2048_url`, (3) render as a plain `<img src="{thumb_url}">` tag — no JS library, no WebGL, no sandbox issues.
 
-Aviation Weather Center METAR/TAF (no key required):
-```
-GET https://aviationweather.gov/api/data/metar?ids=<ICAO>&format=json
-GET https://aviationweather.gov/api/data/taf?ids=<ICAO>&format=json
-```
+**ADIP remarks decoding:** Raw FAA coordination remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962.`) use cryptic abbreviations that passengers can't parse. `_decode_adip_remarks()` calls Groq/Llama with a system prompt listing common expansions (CD=Clearance Delivery, CTC=Contact, ATC=Air Traffic Control, etc.) and `max_tokens=150, temperature=0.1`. Results are cached in `_adip_remarks_cache` by ident and decoded text.
 
-- Not every helipad has an ASOS station. Use the FAA IDENT directly first; fall back to the nearest station within 30 nm (query `?bbox=lat_min,lon_min,lat_max,lon_max`).
-- Parse `flight_category` from METAR: `VFR` (green) / `MVFR` (yellow) / `IFR` (red) / `LIFR` (magenta).
-- Cache responses for 5 minutes (`datetime.utcnow()` based TTL) — METAR updates every 20–60 min.
+**Geocoding cascade:** Nominatim alone fails on business names (e.g. "Enigma Technologies at 32 Mercer St 8th Fl"). Fix: (1) TomTom Fuzzy Search as primary (`/search/2/search/{query}.json?key=...&lat=40.75&lon=-73.98&radius=200000`) handles business names natively, (2) if TomTom returns no result, LLM pre-pass via `_extract_address_with_llm()` strips the business name and floor to get a clean street address, then retry TomTom, (3) Nominatim as final fallback.
 
-| Function | Description |
-|----------|-------------|
-| `fetch_notams_for_ident(ident, api_key)` | Active NOTAMs for one helipad IDENT |
-| `fetch_notams_for_bbox(lat_min, lon_min, lat_max, lon_max, api_key)` | All active NOTAMs in bounding box (radius query per cluster) |
-| `filter_active_notams(notams)` | Keep only NOTAMs whose effective window contains `datetime.utcnow()` |
-| `notam_closes_airspace(notam)` | True if NOTAM is type D (TFR) or contains "airspace" classification |
-| `fetch_metar(icao_id)` | METAR dict: `{wind_dir, wind_kt, visibility_sm, ceiling_ft, flight_category, raw}` |
-| `fetch_taf(icao_id)` | TAF forecast periods list |
-| `route_weather_summary(helipads, api_key)` | Per-helipad dict with `notams`, `metar`, `taf`; one-call-per-pad |
+**Walk mode threshold:** Ground legs < 0.5 km use walk mode (`mode = "walk"`) instead of rideshare. Walk time computed at 5 km/h. The threshold is checked in `compute_skyroute()` before calling `simulate_rideshare()`.
 
-### `src/weather.py` — RainViewer Precipitation
+**TFR data source:** FAA GeoServer WFS (`https://tfr.faa.gov/geoserver/TFR/ows`) was chosen over the FAA Digital NOTAM API because it requires no API key and returns ~230 live TFR polygons in one request. The endpoint was discovered by inspecting the tfr.faa.gov/tfr3 Nuxt SPA JS bundle (`geoWmsURL` in `__INITIAL_STATE__`). The GeoServer is the same backend the official TFR map uses.
 
-RainViewer is free, no API key. Frame JSON updated every ~10 min.
+**NWS over RainViewer:** NWS MRMS (`opengeo.ncep.noaa.gov/geoserver/conus/ows`) was chosen over RainViewer because: (1) it serves WMS tiles that render at all zoom levels without timestamp expiry; (2) `Access-Control-Allow-Origin: *` header allows client-side pixel sampling; (3) no API key or rate limit.
 
-```
-GET https://api.rainviewer.com/public/weather-maps.json
-```
+**TomTom over HERE:** TomTom requires no credit card for the free tier (2,500 calls/day). HERE requires a payment method even for free usage. TomTom Routing API v1 returns a points array directly — no FlexPolyline decoder needed (unlike HERE).
 
-Response structure:
-```json
-{"host": "https://tilecache.rainviewer.com",
- "radar": {"past": [{"time": 1748914800, "path": "/v2/radar/1748914800"}, ...],
-           "nowcast": [{"time": ..., "path": ...}, ...]}}
-```
+**TFR routing avoidance reuses Dijkstra:** Rather than a separate arc algorithm, the existing `findRoute()` Dijkstra in the JS routing template already hard-blocks edges whose 4 sample points fall inside TFR polygons. `findHeliRoute()` is a thin adapter (`lon`→`lng`) that calls `findRoute()` for the aerial leg.
 
-Tile URL pattern: `{host}{path}/256/{z}/{x}/{y}/{color}/{options}.png`
-- Color 2 = "universal blue" (best contrast on Folium/OSM basemap)
-- Options `1_1` = smooth rendering + show snow
+**`@st.cache_data` and underscore parameters:** Streamlit excludes `_`-prefixed parameters from the cache key. `build_routing_html()` parameters `tomtom_key` and `js_v` must NOT have underscore prefixes, or the function always returns the first-cached HTML regardless of the key value.
 
-```python
-# Route precipitation check — lat/lon → tile pixel → intensity
-def _latlon_to_tile(lat, lon, zoom):  # → (x, y, pixel_x, pixel_y)
-    # Standard slippy-map tile formula
-    n = 2 ** zoom
-    x_tile = int((lon + 180) / 360 * n)
-    lat_rad = math.radians(lat)
-    y_tile = int((1 - math.log(math.tan(lat_rad) + 1/math.cos(lat_rad)) / math.pi) / 2 * n)
-    # pixel within 256×256 tile
-    pixel_x = int((lon + 180) / 360 * n * 256) % 256
-    pixel_y = int((1 - math.log(math.tan(lat_rad) + 1/math.cos(lat_rad)) / math.pi) / 2 * n * 256) % 256
-    return x_tile, y_tile, pixel_x, pixel_y
-```
+**TomTom API key injection:** The key is inlined as a string literal (`'__TOMTOM_API_KEY__'` replaced at Python build time) rather than assigned to a JS variable before traffic layer code executes. This avoids variable hoisting failures in the iframe.
 
-Intensity threshold for route warning: pixel green channel > 50 at zoom=6 (covers ~600 km tile; enough resolution for NE US route legs).
+**Routing API call reduction:** `computeMultiModal` originally made 3 sequential `await osrmRoute()` calls (origin→dest, origin→padA, padB→dest). The first `await` was the only one that immediately yielded to the browser, so the "Computing routes…" spinner appeared only because it was first. After restructuring to do sync work first, the spinner stopped appearing because DOM mutations batch until the next `await`. Fix: `await new Promise(r => setTimeout(r, 0))` after setting the status bar forces a browser repaint before any blocking JS runs. The 2 helipad-leg calls were replaced by `estimateDriveLeg()` (haversine × 1.35 road factor, 25 km/h urban speed) — no OSRM request needed, and accuracy is within ±2 min for the typical 2–8 km helipad approach leg.
 
-| Function | Description |
-|----------|-------------|
-| `fetch_rainviewer_frames()` | Returns `{"past": [...], "nowcast": [...]}` with `{time, path}` per frame |
-| `get_radar_tile_url(host, path, z, x, y, color=2)` | Tile URL string for `folium.TileLayer` |
-| `sample_precipitation_at_latlon(lat, lon, host, path, zoom=6)` | Fetch tile PNG, sample pixel → intensity 0–255 |
-| `check_route_precipitation(waypoints, host, path)` | Return list of `{lat, lon, label, intensity, warning}` |
+**Dijkstra corridor bounding:** `findRoute()` builds a graph of all visible helipads. With all layers on (~3000 nodes) and `RANGE_KM=555 km`, the graph is near-complete → O(N²) edge checks. A ±1.5°lat / ±2.5°lon bounding box filter around the route reduces active nodes to ~100–200 for a typical NE US route, cutting Dijkstra work by ~100×. The direct-path TFR check (4 sample points, sync) skips Dijkstra entirely when the straight line is already clear.
 
-### app.py additions
+**`getAllHelipads()` caching:** The function iterated all Leaflet marker objects via `eachLayer()` on every route click (~3000 markers × 3 layers). A module-level `_helipadCache` array is invalidated on `layeradd`/`layerremove` map events — subsequent route clicks reuse the cached array.
 
-**RainViewer tile layer (all Folium maps):**
-```python
-# In build_map() and density/spider maps:
-rv = fetch_rainviewer_frames()
-latest = rv["radar"]["past"][-1]
-radar_url = get_radar_tile_url(rv["host"], latest["path"], "{z}", "{x}", "{y}")
-folium.TileLayer(
-    tiles=radar_url,
-    attr="RainViewer",
-    name="Precipitation radar",
-    overlay=True,
-    control=True,
-    opacity=0.6,
-).add_to(m)
-```
+### Remaining M4 items
 
-**NOTAM layer:**
-```python
-notam_group = folium.FeatureGroup(name="NOTAMs", show=False)
-for n in active_notams:
-    if notam_closes_airspace(n):
-        # polygon TFR
-        folium.Polygon(locations=..., color="red", fill=True, fill_opacity=0.15).add_to(notam_group)
-    else:
-        folium.CircleMarker(location=[lat, lon], radius=8, color="red", popup=n["text"]).add_to(notam_group)
-notam_group.add_to(m)
-```
+- [ ] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges in routing simulator; VFR/MVFR/IFR colour coding
+- [ ] Precipitation warning banner — NWS per-waypoint intensity check; `st.warning()` banner when intensity > mode threshold
+- [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
+- [ ] Streamlit Cloud deployment — set `TOMTOM_API_KEY`, `GROQ_API_KEY`, `MAPILLARY_TOKEN`, `MAPBOX_TOKEN`, `FAA_API_KEY` as platform env vars
 
-**Per-helipad NOTAM badge in popup:** Fetch `fetch_notams_for_ident(ident, api_key)` at load time (cached); if any active closure NOTAM, append `🚫 <b>ACTIVE NOTAM</b>` to the existing popup HTML.
+### Final milestone checklist (21 Jul 2026 — Demo Day)
 
-**Route METAR/TAF panel (routing simulator):** For each helipad leg, render a coloured badge:
-```
-🟢 VFR  NK39  Wind: 250°/12 kt  Vis: 10 SM  Ceiling: unlimited
-🟡 MVFR  JRB  Wind: 180°/5 kt   Vis: 3 SM   Ceiling: 1500 ft
-```
-
-**Precipitation warning banner:** After route is computed, call `check_route_precipitation(waypoints, ...)`. If any waypoint `intensity > 50`: show `st.warning("⚠️ Precipitation detected along [leg name] — check latest radar.")` above the routing simulator.
-
-### Non-obvious constraints
-
-- `FAA_API_KEY`: register free at `https://api.faa.gov` → "Sign Up" → key delivered by email within minutes. The existing `.env.example` already has the placeholder.
-- NOTAM API rate limit: 1000 req/hr on the free tier. For the full NE US cluster (~747 helipads) fetch by radius (25 nm circles centred on NYC/Boston/Philly) rather than one-per-IDENT to stay within limits.
-- RainViewer tile server blocks requests without a Referer or User-Agent header. Set `headers={"User-Agent": "SkyRoute/1.0"}` in the `requests.get()` call inside `sample_precipitation_at_latlon`.
-- Folium `TileLayer` with a dynamic URL (containing the radar timestamp) must be rebuilt every page load — do NOT use `@st.cache_data` on the map function when the radar layer is active, or the tile URL will be stale.
-- METAR API returns an array; if the helipad IDENT has no station, the array is empty. Always check `if result` before accessing `result[0]`.
-- No new packages needed: `requests`, `Pillow` (for PNG pixel sampling), and `folium` are all already in `requirements.txt`.
+- [ ] All remaining M4 items above
+- [ ] End-to-end demo run: Miles Urban persona, NYC → Greenwich CT, live TFR + weather layers, multimodal route with aerial advantage callout
+- [ ] `Worklog.md` updated with Final session notes
+- [ ] Stable public URL added to README header

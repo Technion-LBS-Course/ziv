@@ -152,11 +152,19 @@ For validated FAA helipads, the ADIP Airport Master Record provides TLOF/FATO di
 - **Use:** wind, visibility, ceiling conditions for each helipad along a planned route
 - **Note:** Not all heliports have ASOS stations; query nearest station within 30 nm
 
-### RainViewer Radar (M4)
-- **Frame list:** `https://api.rainviewer.com/public/weather-maps.json`
-- **Tile URL:** `https://tilecache.rainviewer.com{path}/256/{z}/{x}/{y}/2/1_1.png` (color 2 = universal blue)
-- **Auth:** None (free, no key)
-- **Use:** toggleable precipitation radar overlay on Folium map; route precipitation check by sampling tile pixel at waypoint coordinates
+### NWS MRMS Radar (M4)
+- **WMS endpoint:** `https://opengeo.ncep.noaa.gov/geoserver/conus/ows`
+- **Layer:** `conus_bref_qcd` — MRMS composite reflectivity (quality-controlled)
+- **Auth:** None (free, no key); CORS `Access-Control-Allow-Origin: *` — client-side pixel sampling possible
+- **Use:** toggleable precipitation radar overlay on all Folium maps (WMS tile layer rendered at all zoom levels); per-waypoint intensity sampling via `sample_precipitation_at_latlon()`
+- **Precipitation thresholds:** walking >80 warn / >180 avoid; car >120 / >200; helicopter >40 / >120
+
+### Mapillary (M4 — street-level imagery in booking flow)
+- **Search endpoint:** `GET https://graph.mapillary.com/images?closeto={lon},{lat}&radius={m}&fields=id&limit=1`
+- **Thumbnail endpoint:** `GET https://graph.mapillary.com/{image_id}?fields=thumb_2048_url`
+- **Auth:** `Authorization: OAuth {MAPILLARY_TOKEN}` header (server-side Python fetch — no CORS issue)
+- **Use:** nearest street-level photo for each booking leg location (pickup, dropoff, departure helipad, arrival helipad); displayed as `<img>` tag — no JS viewer library needed
+- **Free tier:** unlimited read access, no credit card
 
 ---
 
@@ -277,12 +285,22 @@ src/model.py             →  build_features()          (M3)
                             train_model()             (M3)
                             evaluate_model()          (M3)
 
+src/agent.py             →  run_agent()               (LLM route-planning loop, Groq/Llama)
+                            run_booking()             (booking flow: ADIP lookup, rideshare sim,
+                                                       Mapillary street-view thumbnails)
+                            geocode_place()           (TomTom Fuzzy Search → LLM clean → Nominatim)
+                            find_nearest_mapillary_image()   (server-side, no CORS)
+                            get_mapillary_thumb_url()        (direct CDN JPEG URL)
+
 app.py (Streamlit)
-  ├── Tab: Problem       →  Persona · Journey comparison · HIE pipeline diagram
-  ├── Tab: Literature    →  Quick reference table + 4 paper summaries
-  ├── Tab: Market        →  Competitor analysis · market sizing
-  └── Tab: EDA & HIE     →  Field completeness · elevation consistency · location deviation
-                            KPI (Δ avg first-mile time) · Density heatmap · Routing simulator
+  ├── Tab: Problem        →  Persona · Journey comparison · HIE pipeline diagram
+  ├── Tab: Literature     →  Quick reference table + 4 paper summaries
+  ├── Tab: Market         →  Competitor analysis · market sizing
+  ├── Tab: EDA & HIE      →  Field completeness · elevation consistency · location deviation
+  │                          KPI · Density heatmap · Routing simulator (Leaflet/JS)
+  ├── Tab: Inspector      →  Test set chip viewer (TP/TN/FP/FN) · Live inference on click
+  ├── Tab: Results        →  XGBoost structured baseline · 4-model YOLO comparison
+  └── Tab: Route Assistant →  Natural language routing · booking flow · Mapillary street view
 ```
 
 ---
@@ -294,7 +312,7 @@ app.py (Streamlit)
 | M1 | 19 May 2026 | ✅ DONE | Repo, README, Sprint Plan, Pitch |
 | M2 | 02 Jun 2026 | ✅ DONE | Real data in app, EDA & HIE tab (3 charts + KPI density map), ADIP enrichment, cross-source matching |
 | M3 | 23 Jun 2026 | ✅ DONE | 4-model visual detection comparison (YOLO11m P=0.931 F1=0.888), XGBoost structured baseline (F1=0.73), live Inspector + live inference in app |
-| M4 | 14 Jul 2026 | ⏳ PENDING | NOTAM airspace avoidance + METAR/TAF weather per route leg; RainViewer precipitation overlay on map and route |
+| M4 | 14 Jul 2026 | 🔄 IN PROGRESS | TFR overlay, NWS radar, TomTom routing, Mapbox traffic basemap, validated OSM pool, LLM Route Assistant + booking flow |
 | Final | 21 Jul 2026 | ⏳ PENDING | Demo Day, stable URL, documented |
 
 ### M3 Completed Deliverables
@@ -315,38 +333,40 @@ app.py (Streamlit)
 | Live Inference panel in `app.py` | ✅ Done | Pan/click map → fetch 100 m NAIP + ESRI chip in real-time → run YOLO → show bbox; FAA/OSM/CONUS overlay layers |
 | Results tab — 4-model comparison | ✅ Done | Training curves + comparison bar chart + individual model plots |
 
-### M4 Task Checklist (do NOT start until M3 is submitted)
+### M4 Completed Deliverables
 
-**NOTAM + METAR/TAF integration — `src/notam.py`**
-- [ ] `fetch_notams_for_ident(ident, api_key)` — FAA NOTAM API query by ICAO/IDENT; returns list of active NOTAM dicts
-- [ ] `fetch_notams_for_bbox(lat_min, lon_min, lat_max, lon_max, api_key)` — radius-based query for NOTAM map layer
-- [ ] `filter_active_notams(notams)` — keep only NOTAMs whose effective window overlaps `datetime.utcnow()`
-- [ ] `notam_closes_airspace(notam)` — classify NOTAM as airspace closure (type D / TFR polygon)
-- [ ] `fetch_metar(icao_id)` — Aviation Weather Center METAR for nearest station; returns parsed dict (wind, visibility, ceiling, flight_category)
-- [ ] `fetch_taf(icao_id)` — TAF 24-hr forecast for same station
-- [ ] `route_weather_summary(helipads, api_key)` — for each helipad dict in route, return NOTAM list + METAR; one API call per helipad
+| Task | Status | Notes |
+|------|--------|-------|
+| `scripts/validate_osm_only.py` | ✅ Done | 1,663 OSM-only NE US records → 1,174 visually confirmed (70.6 %); `data/osm_validated.csv` |
+| `src/notam.py` — TFR + METAR | ✅ Done | FAA GeoServer WFS (~230 live TFRs); METAR from Aviation Weather Center; 15-min / 5-min caches |
+| `src/weather.py` — NWS radar | ✅ Done | MRMS `conus_bref_qcd` WMS; per-waypoint precipitation sampling; mode-specific thresholds |
+| TFR overlay on all maps | ✅ Done | `folium.FeatureGroup` red polygons on main/density maps; GeoJSON injected into routing simulator |
+| NWS radar overlay on all maps | ✅ Done | `folium.WmsTileLayer` on main map, density map, routing simulator |
+| METAR badge in FAA popups | ✅ Done | Flight category colour-coded (VFR green / MVFR yellow / IFR red / LIFR magenta) |
+| TFR arc routing in simulator | ✅ Done | Dijkstra multi-hop avoidance; helicopter arcs via intermediate helipad waypoints |
+| TomTom traffic-aware ground routing | ✅ Done | TomTom Routing API v1 with OSRM fallback; `estimateDriveLeg` for helipad approach legs |
+| Mapbox traffic basemap | ✅ Done | `traffic-day-v2` style as switchable basemap in routing simulator + Folium map (replaces deprecated v4 raster overlay) |
+| Validated OSM routing pool | ✅ Done | Inspector Mode C; `validatedLayer` in routing simulator |
+| `run.ps1` / `run.bat` launcher | ✅ Done | Load `.env`, report key status; safe to commit |
+| **`src/agent.py` — LLM Route Assistant** | ✅ Done | Natural language routing via Groq/Llama-3.3-70b; intent detection (route, book, info); TomTom + Nominatim geocoding |
+| **Booking flow** | ✅ Done | Per-leg booking: helicopter (ADIP lookup), rideshare (Uber/Waymo deeplinks), walk mode for legs < 0.5 km |
+| **ADIP remarks decoding** | ✅ Done | Cryptic FAA remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) decoded to plain English via LLM |
+| **Mapillary street-level imagery** | ✅ Done | Server-side image ID lookup + thumbnail fetch; displayed as `<img>` tag — no JS viewer library, no CORS issues |
+| **Geocoding pipeline** | ✅ Done | TomTom Fuzzy Search → LLM address extraction → Nominatim; handles business names and floor-level addresses |
 
-**RainViewer precipitation — `src/weather.py`**
-- [ ] `fetch_rainviewer_frames()` — GET `weather-maps.json`; return latest past frame + nowcast frames as list of `{timestamp, path}`
-- [ ] `get_radar_tile_url(path, z, x, y)` — construct tile URL for Folium `TileLayer`
-- [ ] `sample_precipitation_at_latlon(lat, lon, path)` — fetch tile PNG, convert lat/lon to tile pixel, return intensity 0–255 (0 = no rain)
-- [ ] `check_route_precipitation(waypoints, path)` — return per-waypoint `{lat, lon, intensity, label}` for walk + flight legs
+### M4 Remaining Items
 
-**Post-M3 analysis (prerequisite for M4 routing)**
-- [ ] `scripts/compare_registry_accuracy.py` — run trained YOLO on 747 test chips, compare FAA vs OSM coordinate distance to bbox centre, flag pairs >50m apart as possibly different helipads; output `data/registry_accuracy.csv`
-- [ ] `scripts/validate_osm_only.py` — identify OSM-only NE US helipads (no FAA match), fetch NAIP chip per pad, run `detect_helipad_cascade()`, write `data/osm_validated.csv`; visually confirmed OSM pads join routing pool
+- [ ] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges in routing simulator; VFR/MVFR/IFR colour coding
+- [ ] Precipitation warning banner — per-waypoint NWS intensity check; `st.warning()` banner above routing output when intensity > threshold
+- [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
 
-**`app.py` map and routing updates**
-- [ ] RainViewer radar overlay — toggleable `folium.TileLayer` on all Folium maps; auto-fetch latest frame timestamp on load
-- [ ] NOTAM layer — `folium.FeatureGroup` with circle/polygon markers for active NOTAMs in the NE US bounding box; TFR areas as `folium.Polygon` with red outline
-- [ ] Per-helipad NOTAM badge in FAA popup — `🚫 ACTIVE NOTAM` if any active NOTAM for that IDENT; else hidden
-- [ ] Route METAR/TAF panel — for each helipad leg in routing simulator, show wind/visibility/ceiling; color-coded VFR (green) / MVFR (yellow) / IFR (red) / LIFR (magenta)
-- [ ] Precipitation warning banner — if `sample_precipitation_at_latlon` returns intensity > 50 at any walk or flight waypoint, show `⚠️ Precipitation detected along [leg name]`
-- [ ] Routing pool includes validated OSM-only pads from `data/osm_validated.csv` (hie_visual_detected=True)
+### Final Milestone Checklist (21 Jul 2026 — Demo Day)
 
-**Environment**
-- [ ] `FAA_API_KEY` already in `.env.example` — wire into `src/notam.py` via `os.getenv("FAA_API_KEY")`
-- [ ] No new packages needed (all use `requests` + `folium` already in requirements)
+- [ ] Complete remaining M4 items above
+- [ ] Streamlit Cloud deployment — set `TOMTOM_API_KEY`, `GROQ_API_KEY`, `MAPILLARY_TOKEN`, `MAPBOX_TOKEN`, `FAA_API_KEY` as platform env vars
+- [ ] Stable public URL in README header
+- [ ] End-to-end demo walkthrough: Miles Urban persona, NYC → Greenwich CT, live TFR + weather layers, multimodal route with aerial advantage callout
+- [ ] `Worklog.md` updated with Final session notes
 
 ---
 
@@ -355,17 +375,26 @@ app.py (Streamlit)
 ```bash
 pip install -r requirements.txt
 
-# Fetch M2 data (one-time)
-python scripts/fetch_ny_data.py        # ~2 min — FAA + OSM
-python scripts/fetch_adip_details.py   # ~6 min — ADIP enrichment
+# Copy secrets template and fill in API keys
+copy .env.example .env   # Windows CMD
+# Required: TOMTOM_API_KEY · GROQ_API_KEY · MAPILLARY_TOKEN · MAPBOX_TOKEN
 
-# Build M3 YOLO training dataset (~3 hrs, resumable)
-python scripts/build_yolo_dataset.py
+# Launch dashboard (preferred — loads .env and reports key status)
+.\run.bat          # Windows CMD
+.\run.ps1          # PowerShell
 
-# Launch main dashboard
+# Or directly:
 streamlit run app.py
 
-# Launch annotation review tool
+# ── One-time data pipeline ────────────────────────────────────────────────────
+python scripts/fetch_ny_data.py        # ~2 min — FAA + OSM raw data
+python scripts/fetch_adip_details.py   # ~6 min — ADIP enrichment (747 records)
+python scripts/validate_osm_only.py    # ~20 min — HIE validation of OSM-only pads
+
+# ── M3 YOLO training dataset (one-time, resumable) ───────────────────────────
+python scripts/build_yolo_dataset.py   # ~3 hrs
+
+# ── Annotation review (run after build_yolo_dataset.py) ──────────────────────
 streamlit run scripts/annotate_dataset.py
 ```
 
@@ -381,28 +410,38 @@ ziv/
 ├── requirements.txt        ← Pinned dependencies (Python 3.11+)
 ├── .gitignore
 ├── .env.example            ← Secrets template
-├── app.py                  ← Streamlit dashboard (~2700 lines)
+├── app.py                  ← Streamlit dashboard (~4000 lines)
+├── run.ps1 / run.bat       ← Launcher scripts: load .env, report key status, start app
 ├── src/
 │   ├── data.py             ← Data ingestion, cleaning, schema normalisation
 │   ├── analysis.py         ← Cross-source matching, consistency, completeness
-│   └── model.py            ← XGBoost feature engineering & training (M3)
+│   ├── model.py            ← XGBoost feature engineering & training (M3)
+│   ├── hie.py              ← HIE detection module: classical CV, YOLO, cascade, NAIP/ESRI fetch
+│   ├── notam.py            ← TFR live feed (FAA GeoServer WFS) + METAR (Aviation Weather Center)
+│   ├── weather.py          ← NWS MRMS radar WMS layer + per-waypoint precipitation sampling
+│   └── agent.py            ← LLM Route Assistant: routing, booking, geocoding, Mapillary
 ├── scripts/
 │   ├── fetch_ny_data.py         ← Download FAA + OSM raw data (M2)
 │   ├── fetch_adip_details.py    ← Enrich FAA records via ADIP API (M2)
 │   ├── build_yolo_dataset.py    ← 8-step NAIP chip pipeline for YOLO dataset (M3)
 │   ├── annotate_dataset.py      ← Streamlit annotation review tool (M3)
 │   ├── train_yolo.py            ← Train YOLOv8s + evaluate vs XGBoost baseline + 5 comparison plots
-│   ├── compare_registry_accuracy.py  ← FAA vs OSM coordinate accuracy vs YOLO bbox centre (post-training)
-│   ├── validate_osm_only.py    ← NAIP inference on OSM-only helipads → osm_validated.csv (post-training)
-│   └── fix_split_duplicates.py ← One-time fix: removes 570 chips present in both train/ and val/ (run with --apply)
-├── models/                 ← Trained weights land here (gitignored except .gitkeep)
+│   ├── compare_models.py        ← Unified 4-model evaluation (YOLOv8s/YOLO11s/YOLO11m/RT-DETR-L)
+│   ├── train_xgboost.py         ← Train XGBoost on 17 ADIP features; outputs hie_xgboost.pkl
+│   ├── validate_osm_only.py     ← NAIP inference on OSM-only helipads → osm_validated.csv (M4)
+│   ├── compare_registry_accuracy.py  ← FAA vs OSM coordinate accuracy vs YOLO bbox centre
+│   └── fix_split_duplicates.py  ← One-time fix: removes 570 chips in both train/ and val/
+├── models/                 ← Trained weights (gitignored except .gitkeep)
+│   ├── helipad_yolov8s.pt
+│   ├── helipad_run_yolo11s/weights/best.pt
+│   ├── helipad_run_yolo11m/weights/best.pt   ← production model
+│   └── helipad_run_rtdetr_l/weights/best.pt
 ├── assets/
-│   └── helipad_grounding_dino.jpg
+│   └── helipad_grounding_dino.jpg  ← early zero-shot experiment reference image
 ├── data/                   ← All data files — gitignored
 │   └── yolo_dataset/       ← NAIP chips + YOLO labels + review decisions
 └── notebooks/
-    ├── 01_eda.ipynb        ← EDA (M2)
-    └── 02_yolo_training.ipynb  ← YOLOv8s training on Colab (M3, planned)
+    └── 01_eda.ipynb        ← EDA (M2)
 ```
 
 ---

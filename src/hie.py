@@ -211,11 +211,16 @@ def detect_yolo(image: Image.Image, model) -> dict:
 def load_yolo_model(path: Path = YOLO_MODEL_PATH):
     """Load a trained ultralytics YOLO model from disk.
 
+    Runs a dummy predict after loading to force model fusion and predictor
+    initialisation.  Ultralytics 8.4.x raises an AttributeError during
+    fuse() for some Conv layers; suppressing it here prevents it from
+    surfacing on the first real predict() call inside the app.
+
     Args:
         path: Path to .pt weights file (default: models/helipad_yolov8s.pt).
 
     Returns:
-        Loaded YOLO model.
+        Loaded and pre-warmed YOLO model.
 
     Raises:
         FileNotFoundError: If weights file does not exist.
@@ -223,7 +228,14 @@ def load_yolo_model(path: Path = YOLO_MODEL_PATH):
     from ultralytics import YOLO
     if not path.exists():
         raise FileNotFoundError(f"YOLO weights not found: {path}")
-    return YOLO(str(path))
+    model = YOLO(str(path))
+    # Pre-warm: forces setup_model() / fuse() to run once here (suppressed)
+    # rather than raising AttributeError mid-session on the first real call.
+    try:
+        model.predict(np.zeros((640, 640, 3), dtype=np.uint8), conf=0.25, verbose=False)
+    except AttributeError:
+        pass  # ultralytics 8.4.x fuse() conv.bn compat issue — model still works
+    return model
 
 
 # ────────────────────────────────────────────────────────────────────────────

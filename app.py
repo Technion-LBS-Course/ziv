@@ -6,8 +6,17 @@ Run:
 
 # Windows: numpy / PyTorch / XGBoost each ship libiomp5md.dll → OMP Error #15.
 # Must be set before any of those libraries are imported.
+import math
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# Load .env BEFORE any os.getenv() calls so API keys are available.
+# .env is gitignored — never committed. See .env.example for required keys.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed — keys must be set in the environment directly
 
 # Suppress "Tried to instantiate class '__path__._path'" log noise.
 # Streamlit's file-watcher inspects every sys.modules entry's __path__; when it
@@ -56,8 +65,38 @@ from src.hie import (
     load_yolo_model,
     YOLO_MODEL_PATH,
 )
+from src.notam import fetch_active_tfrs, tfrs_to_geojson, fetch_metar
+from src.weather import (
+    get_nws_wms_kwargs,
+    PRECIP_THRESHOLDS,
+)
+from src.agent import run_agent, run_booking, is_booking_intent
 
 log = logging.getLogger(__name__)
+
+# ── live data helpers (TTL-cached so map rebuilds don't hammer external APIs) ──
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_active_tfrs() -> list:
+    try:
+        return fetch_active_tfrs()
+    except Exception:
+        log.warning("TFR fetch failed; returning empty list", exc_info=True)
+        return []
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_metar_bbox(lat_min: float, lon_min: float, lat_max: float, lon_max: float):
+    try:
+        r = requests.get(
+            "https://aviationweather.gov/api/data/metar",
+            params={"bbox": f"{lat_min},{lon_min},{lat_max},{lon_max}", "format": "json"},
+            timeout=8,
+            headers={"User-Agent": "SkyRoute/1.0"},
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return []
 
 # ── constants ──────────────────────────────────────────────────────────────────
 DATA_DIR        = Path(__file__).parent / "data"
@@ -594,8 +633,8 @@ st.markdown("# 🚁 SkyRoute — Helipad Intelligence Engine")
 st.divider()
 
 # ── outer tabs ─────────────────────────────────────────────────────────────────
-tab_problem, tab_lit, tab_market, tab_eda, tab_inspector, tab_results = st.tabs([
-    "📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE", "🔍 Inspector", "📈 Results",
+tab_problem, tab_lit, tab_market, tab_eda, tab_inspector, tab_results, tab_agent = st.tabs([
+    "📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE", "🔍 Inspector", "📈 Results", "💬 Route Assistant",
 ])
 
 
@@ -698,7 +737,7 @@ with tab_problem:
   <div style="color:#475569;font-size:18px">→</div>
   <div style="background:#0d2137;border:2px solid #a78bfa;border-radius:8px;
               padding:10px 14px;color:#c4b5fd;min-width:130px;text-align:center">
-    🔍 <b>Phase 1</b><br><span style="font-size:10px">Grounding DINO<br>Visual check</span>
+    🛰️ <b>Phase 1</b><br><span style="font-size:10px">YOLO11m<br>Visual check</span>
   </div>
   <div style="color:#475569;font-size:18px">→</div>
   <div style="background:#0d2137;border:2px solid #60a5fa;border-radius:8px;
@@ -724,7 +763,7 @@ with tab_problem:
         if _GROUNDING_DINO_IMG.exists():
             st.image(
                 str(_GROUNDING_DINO_IMG),
-                caption="Grounding DINO bounding box on a rooftop helipad (ESRI zoom 19)",
+                caption="YOLO11m detection on a rooftop helipad (NAIP 100 m × 100 m chip)",
                 use_column_width=True,
             )
         else:
@@ -738,30 +777,31 @@ with tab_problem:
             )
     with ph1_col:
         st.markdown("""
-**Phase 1 — Visual Validation: Grounding DINO**
+**Phase 1 — Visual Validation: YOLO11m (Fine-tuned)**
 
-For every FAA and OSM candidate pad, SkyRoute fetches a zoom-19 ESRI satellite chip
-(~0.22 m/px at lat 41°) and runs it through **Grounding DINO** — a zero-shot open-set
-object detector prompted with the text *"helipad"*.
+For every FAA and OSM candidate pad, SkyRoute fetches a **100 m × 100 m NAIP satellite chip**
+(USDA APFO ImageServer, ~0.16 m/px effective GSD) centred on the registry coordinate and runs
+it through a **fine-tuned YOLO11m detector** — trained on 1,200+ annotated NAIP chips derived
+from the HelipadCAT dataset with manual annotation correction.
 
 | | |
 |---|---|
-| **Input** | 768 × 768 px satellite chip centred on registry coord |
-| **Model** | Grounding DINO (open-set, no helipad-labelled training data needed) |
-| **Output** | Bounding box `[x₁,y₁,x₂,y₂]` + confidence score |
+| **Input** | 640 × 640 px NAIP chip centred on registry coord (~100 m × 100 m window) |
+| **Model** | YOLO11m fine-tuned · P=0.931 · R=0.848 · **F1=0.888** |
+| **Output** | Bounding box `[x₁,y₁,x₂,y₂]` + confidence score (threshold ≥ 0.50) |
 | **Action — detected** | Centroid projected back to lat/lon → coordinate corrected if offset > 15 m |
-| **Action — not found** | Pad flagged `unverified`; excluded from routing until manually reviewed |
-| **Metric (M3 KPI)** | Detection rate · mean coordinate offset (m) vs FAA registry |
+| **Action — not found** | Pad flagged `unverified`; excluded from routing pool |
+| **Metric (M3 KPI)** | F1=0.888 on 747 held-out NE US test chips vs 0.32 registry-only baseline |
 """)
     with ph1_ex:
         st.markdown("""
 <div style="background:#0a1628;border:1px solid #a78bfa;border-radius:8px;padding:12px 14px;font-size:12px">
-<div style="color:#a78bfa;font-weight:700;margin-bottom:8px">🔍 Grounding DINO — example output</div>
+<div style="color:#a78bfa;font-weight:700;margin-bottom:8px">🛰️ YOLO11m — example inference</div>
 <div style="background:#1a1a2e;border-radius:6px;padding:8px;margin-bottom:8px;font-family:monospace;font-size:11px;color:#e2e8f0">
-<span style="color:#fbbf24">Satellite chip</span> · zoom 19 · 768×768 px<br>
+<span style="color:#fbbf24">NAIP chip</span> · 640×640 px · 100m×100m<br>
 <span style="color:#34d399">▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮</span>  ← rooftop building<br>
-<span style="color:#f97316">┌──────────────┐</span>  ← detected bbox<br>
-<span style="color:#f97316">│</span>  <b style="color:#fff">H</b> marking     <span style="color:#f97316">│</span>  conf: <b style="color:#22c55e">0.91</b><br>
+<span style="color:#f97316">┌──────────────┐</span>  ← YOLO11m bbox<br>
+<span style="color:#f97316">│</span>  <b style="color:#fff">H</b> marking     <span style="color:#f97316">│</span>  conf: <b style="color:#22c55e">0.94</b><br>
 <span style="color:#f97316">│</span>  yellow border <span style="color:#f97316">│</span><br>
 <span style="color:#f97316">└──────────────┘</span><br>
 <span style="color:#60a5fa">centroid</span>: 40.7236 N, 74.0482 W<br>
@@ -770,8 +810,8 @@ object detector prompted with the text *"helipad"*.
 </div>
 <div style="color:#64748b;font-size:10px">
 Typical rooftop pad — yellow safety border and H marking are
-the primary detection anchors. Building parallax at zoom 19
-introduces ±3–8 m apparent offset.
+the primary detection anchors. NAIP 0.16 m/px GSD resolves
+the H marking at 3–4 px height (sufficient for fine-tuned YOLO).
 </div>
 </div>
 """, unsafe_allow_html=True)
@@ -796,7 +836,7 @@ an LLM with web-search access (Google Gemini / GPT-4o) to verify operational sta
 | **Output** | `operational` · `military` · `closed` · `uncertain` |
 | **Action — operational** | Pad promoted to routing pool ✅ |
 | **Action — military / closed** | Pad excluded; tagged with reason 🚫 |
-| **Action — uncertain** | Held for Grounding DINO visual re-check 🔄 |
+| **Action — uncertain** | Held for YOLO11m visual re-check 🔄 |
 | **Metric (M3 KPI)** | Classification accuracy on a hand-labelled held-out set |
 """)
     with ph2_ex:
@@ -1206,6 +1246,14 @@ var esriSat = L.tileLayer(
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
   {attribution: 'Tiles &copy; Esri', maxZoom: 20, maxNativeZoom: 19}
 );
+var radarLayer = L.tileLayer.wms('https://opengeo.ncep.noaa.gov/geoserver/conus/ows', {
+  layers: 'conus_bref_qcd',
+  format: 'image/png',
+  transparent: true,
+  version: '1.3.0',
+  attribution: '<a href="https://radar.weather.gov">NWS Radar</a>',
+  opacity: 0.7,
+});
 var map = L.map('map', {center: [40.75, -73.5], zoom: 8, layers: [osmDay]});
 L.control.scale({metric: true, imperial: true}).addTo(map);
 
@@ -1312,22 +1360,107 @@ var osmHelipadLayer = L.geoJSON(osmHelipadData, {
   }
 });
 
-var allPointLayers = [helipadLayer, osmHelipadLayer];
+// ── HIE-validated helipads (FAA pads confirmed by YOLO, gt=1) ─────────────────
+var validatedData = __VALIDATED_GEOJSON__;
+var crVal = L.canvas({padding: 0.5});
+var validatedLayer = L.geoJSON(validatedData, {
+  renderer: crVal,
+  pointToLayer: function(f, ll) {
+    return L.circleMarker(ll, {
+      radius:6, color:'#16a34a', fillColor:'#4ade80', fillOpacity:0.9, weight:2
+    });
+  },
+  onEachFeature: function(f, l) {
+    var p=f.properties, name=p.NAME||p.IDENT||'Helipad';
+    l.bindTooltip(name+' ✅', {sticky:true});
+    l.bindPopup(
+      '<b>'+name+'</b><br>IDENT: '+(p.IDENT||'—')+'<br>'+
+      (p.STATE?'State: '+p.STATE+'<br>':'')+
+      '<span style="color:#4ade80">✅ HIE Validated (YOLO confirmed)</span>',
+      {maxWidth:230}
+    );
+  }
+});
+
+// ── NOTAM / TFR layer ─────────────────────────────────────────────────────────
+var notamData = __NOTAM_GEOJSON__;
+var weatherThresholds = __WEATHER_THRESHOLDS__;
+
+// Ray-casting point-in-polygon. ring: GeoJSON format [[lon, lat], ...]
+function pointInPolygon(ptLat, ptLon, ring) {
+  var inside = false;
+  for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    var lonI = ring[i][0], latI = ring[i][1];
+    var lonJ = ring[j][0], latJ = ring[j][1];
+    if (((latI > ptLat) !== (latJ > ptLat)) &&
+        (ptLon < (lonJ - lonI) * (ptLat - latI) / (latJ - latI) + lonI))
+      inside = !inside;
+  }
+  return inside;
+}
+function isInActiveTFR(lat, lon) {
+  for (var fi = 0; fi < notamData.features.length; fi++) {
+    var f = notamData.features[fi];
+    if (f.geometry && f.geometry.type === 'Polygon') {
+      if (pointInPolygon(lat, lon, f.geometry.coordinates[0])) return true;
+    }
+  }
+  return false;
+}
+
+var notamLayer = L.geoJSON(notamData, {
+  style: function(f) {
+    return f.geometry.type === 'Polygon'
+      ? {color: '#ef4444', weight: 2, fillOpacity: 0.15, fillColor: '#ef4444'}
+      : {};
+  },
+  pointToLayer: function(f, ll) {
+    return L.circleMarker(ll, {radius: 8, color: '#ef4444', fill: true, fillOpacity: 0.4});
+  },
+  onEachFeature: function(f, l) {
+    var txt = (f.properties && f.properties.text) ? f.properties.text : 'Active TFR';
+    l.bindPopup('<b>🚫 Active TFR</b><br><small>' + txt + '</small>', {maxWidth: 280});
+    l.bindTooltip('🚫 ' + txt.slice(0, 60), {sticky: true});
+  }
+});
+
+var allPointLayers = [helipadLayer, osmHelipadLayer, validatedLayer];
+
+// ── Mapbox traffic basemap (green/yellow/red roads) ──────────────────────────
+// Uses the traffic-day-v2 style — shows live congestion colors on a full basemap.
+// Added as a basemap option (not overlay) because Mapbox dropped the v4 raster overlay API.
+var mapboxTrafficLayer = null;
+if('__MAPBOX_TOKEN__'){
+  mapboxTrafficLayer = L.tileLayer(
+    'https://api.mapbox.com/styles/v1/mapbox/traffic-day-v2/tiles/256/{z}/{x}/{y}?access_token=__MAPBOX_TOKEN__',
+    {attribution:'© <a href="https://www.mapbox.com">Mapbox</a>', maxZoom:22, tileSize:256}
+  );
+}
+
+var _overlays = {
+  'Helipads (FAA)': helipadLayer,
+  'Helipads (OSM)': osmHelipadLayer,
+  '✅ HIE Validated': validatedLayer,
+  'Business POIs':  poiLayer,
+  'Exec. Residences': resLayer,
+  '🚫 TFRs (airspace)': notamLayer,
+  '⛈ Precipitation radar': radarLayer,
+};
+// Mapbox traffic is a basemap (not overlay) — full road network with live congestion colors
+var _basemaps = {'Street Map': osmDay, 'Satellite (ESRI)': esriSat};
+if(mapboxTrafficLayer) _basemaps['Traffic (Mapbox)'] = mapboxTrafficLayer;
 
 L.control.layers(
-  {'Street Map': osmDay, 'Satellite (ESRI)': esriSat},
-  {
-    'Helipads (FAA)': helipadLayer,
-    'Helipads (OSM)': osmHelipadLayer,
-    'Business POIs':  poiLayer,
-    'Exec. Residences': resLayer,
-  },
+  _basemaps,
+  _overlays,
   {collapsed: false}
 ).addTo(map);
 helipadLayer.addTo(map);
 osmHelipadLayer.addTo(map);
+validatedLayer.addTo(map);
 poiLayer.addTo(map);
 resLayer.addTo(map);
+// notamLayer, radarLayer off by default — user toggles via layer control
 
 // ── utils ─────────────────────────────────────────────────────────────────────
 function haversine(lat1, lon1, lat2, lon2) {
@@ -1336,15 +1469,36 @@ function haversine(lat1, lon1, lat2, lon2) {
     Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)*Math.sin(dLon/2);
   return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
 }
+// NWS radar precipitation sample at a lat/lon point.
+// Browser-side canvas read — CORS open (Access-Control-Allow-Origin: *).
+// Returns red-channel intensity 0–255 (0 = no precipitation).
+// Called only when a route is computed (2 requests total, not at page load).
+async function samplePrecip(lat, lon) {
+  var d=0.025;
+  var url='https://opengeo.ncep.noaa.gov/geoserver/conus/ows?service=WMS&version=1.3.0' +
+    '&request=GetMap&layers=conus_bref_qcd&bbox='+(lat-d)+','+(lon-d)+','+(lat+d)+','+(lon+d)+
+    '&width=3&height=3&crs=EPSG:4326&format=image/png&transparent=true';
+  try {
+    var bmp=await createImageBitmap(await (await fetch(url)).blob());
+    var cv=document.createElement('canvas'); cv.width=3; cv.height=3;
+    var cx=cv.getContext('2d'); cx.drawImage(bmp,0,0);
+    var px=cx.getImageData(1,1,1,1).data;
+    return px[3]>10 ? px[0] : 0;
+  } catch(e){ return 0; }
+}
 function fmtDur(m) {
   if (m<60) return Math.round(m)+' min';
   return Math.floor(m/60)+'h'+(Math.round(m%60)>0?' '+Math.round(m%60)+'m':'');
 }
 function fmtDist(km) { return km<1 ? Math.round(km*1000)+' m' : km.toFixed(1)+' km'; }
+// Cache helipad list — invalidate only when layer visibility changes
+var _helipadCache=null;
+map.on('layeradd layerremove',function(){_helipadCache=null;});
 function getAllHelipads() {
+  if(_helipadCache) return _helipadCache;
   var pts=[];
   allPointLayers.forEach(function(ly){
-    if (!map.hasLayer(ly)) return;   // skip unchecked layers
+    if (!map.hasLayer(ly)) return;
     ly.eachLayer(function(l){
       if(!l.feature) return;
       var ll=l.getLatLng?l.getLatLng():l.getBounds().getCenter();
@@ -1352,12 +1506,32 @@ function getAllHelipads() {
       pts.push({lat:ll.lat, lon:ll.lng, name:p.NAME||p.name||'Helipad'});
     });
   });
+  _helipadCache=pts;
   return pts;
+}
+
+// Fast estimate for short drive legs to/from helipad.
+// Uses haversine × 1.35 road-network factor, 25 km/h urban average.
+// Avoids an OSRM/TomTom call for each leg — cuts API calls from 3 → 1.
+function estimateDriveLeg(lat1,lng1,lat2,lng2) {
+  var d=haversine(lat1,lng1,lat2,lng2)*1.35;
+  return {dist:d, duration:d/25*60,
+          geom:{type:'LineString',coordinates:[[lng1,lat1],[lng2,lat2]]}};
 }
 function nearestHelipad(lat,lng,pts) {
   var best=null,bd=Infinity;
   pts.forEach(function(p){var d=haversine(lat,lng,p.lat,p.lon);if(d<bd){bd=d;best=p;}});
   return best?{pad:best,dist:bd}:null;
+}
+// Adapter: findRoute expects {lat, lng} (Leaflet); pads use {lat, lon}.
+// Returns the Dijkstra result with path[0]/path[last] names patched to real pad names.
+function findHeliRoute(padA,padB,pts){
+  var r=findRoute({lat:padA.lat,lng:padA.lon},{lat:padB.lat,lng:padB.lon},pts);
+  if(r&&r.path.length>=2){
+    r.path[0].name=padA.name||padA.IDENT||'Departure';
+    r.path[r.path.length-1].name=padB.name||padB.IDENT||'Arrival';
+  }
+  return r;
 }
 
 // ── custom markers ────────────────────────────────────────────────────────────
@@ -1432,16 +1606,73 @@ function setBar(groundMin, airMin) {
   }
 }
 
-// ── OSRM ──────────────────────────────────────────────────────────────────────
+// ── Routing (TomTom traffic-aware → OSRM fallback → haversine) ───────────────
+// TomTom free tier: 2,500 req/day, NO credit card required.
+// Register at https://developer.tomtom.com/ (email only).
+// Add to .env:  TOMTOM_API_KEY=your_key
+var TOMTOM_KEY='__TOMTOM_API_KEY__';
+
+// ── Quota guard (localStorage) ────────────────────────────────────────────────
+// Hard-stops paid API calls before the daily limit to prevent any surprise charges.
+// Falls back to OSRM automatically when quota is reached.
+var _QUOTA_KEY='skyroute_tomtom_quota';
+var _DAILY_LIMIT=2000;   // TomTom free = 2500/day; stop at 2000 for safety margin
+
+function _quotaOk(){
+  try{
+    var raw=localStorage.getItem(_QUOTA_KEY);
+    var q=raw?JSON.parse(raw):{date:'',count:0};
+    var today=new Date().toISOString().slice(0,10);
+    if(q.date!==today){q={date:today,count:0};}
+    if(q.count>=_DAILY_LIMIT){
+      console.warn('SkyRoute: TomTom daily quota reached ('+q.count+'/'+_DAILY_LIMIT+'). Using OSRM fallback.');
+      return false;
+    }
+    q.count++;
+    localStorage.setItem(_QUOTA_KEY,JSON.stringify(q));
+    return true;
+  }catch(e){return true;} // if localStorage unavailable, allow call
+}
+function _quotaStatus(){
+  try{
+    var raw=localStorage.getItem(_QUOTA_KEY);
+    if(!raw) return '0/'+_DAILY_LIMIT+' today';
+    var q=JSON.parse(raw);
+    var today=new Date().toISOString().slice(0,10);
+    if(q.date!==today) return '0/'+_DAILY_LIMIT+' today';
+    return q.count+'/'+_DAILY_LIMIT+' today';
+  }catch(e){return 'unknown';}
+}
+
 async function osrmRoute(lat1,lng1,lat2,lng2,profile) {
-  var url='https://router.project-osrm.org/route/v1/'+profile+'/'+
+  // 1. Try TomTom (live traffic, 2500 req/day free, no credit card)
+  if(TOMTOM_KEY && _quotaOk()){
+    var tmUrl='https://api.tomtom.com/routing/1/calculateRoute/'+
+      lat1.toFixed(6)+','+lng1.toFixed(6)+':'+lat2.toFixed(6)+','+lng2.toFixed(6)+
+      '/json?travelMode='+(profile==='driving'?'car':'pedestrian')+
+      '&traffic=true&routeType=fastest&key='+TOMTOM_KEY;
+    try{
+      var tj=await (await fetch(tmUrl)).json();
+      var leg=tj.routes[0].legs[0];
+      var pts=tj.routes[0].legs[0].points||[];
+      var geom=pts.length?{type:'LineString',coordinates:pts.map(function(p){return[p.longitude,p.latitude];})}:null;
+      return {
+        dist:     tj.routes[0].summary.lengthInMeters/1000,
+        duration: tj.routes[0].summary.travelTimeInSeconds/60,
+        geom:     geom
+      };
+    }catch(e){}
+  }
+  // 2. OSRM fallback (no traffic)
+  var oUrl='https://router.project-osrm.org/route/v1/'+profile+'/'+
     lng1.toFixed(6)+','+lat1.toFixed(6)+';'+lng2.toFixed(6)+','+lat2.toFixed(6)+
     '?overview=full&geometries=geojson';
-  try {
-    var r=await (await fetch(url)).json();
+  try{
+    var r=await (await fetch(oUrl)).json();
     if(r.code==='Ok'&&r.routes&&r.routes.length)
       return {dist:r.routes[0].distance/1000, duration:r.routes[0].duration/60, geom:r.routes[0].geometry};
-  } catch(e){}
+  }catch(e){}
+  // 3. Haversine last resort
   var d=haversine(lat1,lng1,lat2,lng2);
   return {dist:d, duration:d/30*60, geom:null};
 }
@@ -1450,22 +1681,61 @@ async function osrmRoute(lat1,lng1,lat2,lng2,profile) {
 async function computeMultiModal(pA, pB) {
   var sb=document.getElementById('status-bar');
   sb.innerHTML='&#x23F3; Computing routes&hellip;'; sb.style.display='block';
+  // Yield to browser so the spinner paints before any blocking work starts.
+  await new Promise(function(r){setTimeout(r,0);});
 
-  var driveR=await osrmRoute(pA.lat,pA.lng,pB.lat,pB.lng,'driving');
-  var driveDur=driveR.duration, taxiDur=driveDur*1.1, transitDur=driveDur*1.5;
+  // ── 1. Synchronous work: find helipads + plan aerial path ─────────────────
+  // Must complete before network calls so padA/padB are known.
+  var allPts=getAllHelipads();
+  var nearA=nearestHelipad(pA.lat,pA.lng,allPts);
+  var nearB=nearestHelipad(pB.lat,pB.lng,allPts);
+  var padA=null,padB=null,heliPath=null,hd=0,hDur=0,tfrNote='',heliPossible=false;
+  if(nearA&&nearB){
+    padA=nearA.pad; padB=nearB.pad;
+    heliPath=[padA,padB];
+    hd=haversine(padA.lat,padA.lon,padB.lat,padB.lon);
+    hDur=hd/SPEED_HELI_KMH*60;
+    if(map.hasLayer(notamLayer)&&hd>0.1&&hd<=RANGE_KM){
+      // Fast direct-path check: 4 sample points. Skip Dijkstra if direct is clear.
+      var directBlocked=false;
+      for(var tk=1;tk<=4;tk++){
+        var tt=tk/5;
+        if(isInActiveTFR(padA.lat+tt*(padB.lat-padA.lat),padA.lon+tt*(padB.lon-padA.lon))){directBlocked=true;break;}
+      }
+      if(directBlocked){
+        var route=findHeliRoute(padA,padB,allPts);
+        if(route&&route.path&&route.path.length>=2){
+          heliPath=route.path; hd=route.dist; hDur=route.dur;
+        } else {
+          tfrNote=' <span style="color:#ef4444;font-size:10px">🚫 All paths cross active TFR</span>';
+        }
+      }
+      if(!tfrNote&&(isInActiveTFR(padA.lat,padA.lon)||isInActiveTFR(padB.lat,padB.lon)))
+        tfrNote=' <span style="color:#f59e0b;font-size:10px">⚠ TFR near pad — auth may be required</span>';
+    }
+    heliPossible=hd>0.1&&hd<=RANGE_KM;
+  }
   var walkDist=haversine(pA.lat,pA.lng,pB.lat,pB.lng), walkDur=walkDist/SPEED_WALK_KMH*60;
 
-  var allPts=getAllHelipads(), nearA=nearestHelipad(pA.lat,pA.lng,allPts), nearB=nearestHelipad(pB.lat,pB.lng,allPts);
+  // ── 2. Three OSRM calls in parallel — wall time = slowest single call (~1-3 s)
+  // All three run simultaneously so road geometry is accurate for every leg.
+  var _routePromises=[
+    osrmRoute(pA.lat,pA.lng,pB.lat,pB.lng,'driving'),
+    heliPossible?osrmRoute(pA.lat,pA.lng,padA.lat,padA.lon,'driving'):Promise.resolve(null),
+    heliPossible?osrmRoute(padB.lat,padB.lon,pB.lat,pB.lng,'driving'):Promise.resolve(null),
+  ];
+  var _routeRes=await Promise.all(_routePromises);
+  var driveR=_routeRes[0];
+  // Fallback to straight-line estimate if OSRM leg failed (OSRM returns null on error)
+  var d2a=_routeRes[1]||(heliPossible?estimateDriveLeg(pA.lat,pA.lng,padA.lat,padA.lon):null);
+  var d2b=_routeRes[2]||(heliPossible?estimateDriveLeg(padB.lat,padB.lon,pB.lat,pB.lng):null);
+
+  var driveDur=driveR.duration, taxiDur=driveDur*1.1, transitDur=driveDur*1.5;
   var heli=null;
-  if(nearA&&nearB) {
-    var hd=haversine(nearA.pad.lat,nearA.pad.lon,nearB.pad.lat,nearB.pad.lon);
-    if(hd>0.1&&hd<=RANGE_KM) {
-      var d2a=await osrmRoute(pA.lat,pA.lng,nearA.pad.lat,nearA.pad.lon,'driving');
-      var d2b=await osrmRoute(nearB.pad.lat,nearB.pad.lon,pB.lat,pB.lng,'driving');
-      var hDur=hd/SPEED_HELI_KMH*60;
-      heli={dur:d2a.duration+hDur+d2b.duration, dist:d2a.dist+hd+d2b.dist,
-            hd:hd, hDur:hDur, padA:nearA.pad, padB:nearB.pad, gA:d2a.geom, gB:d2b.geom};
-    }
+  if(heliPossible){
+    heli={dur:d2a.duration+hDur+d2b.duration, dist:d2a.dist+hd+d2b.dist,
+          hd:hd, hDur:hDur, padA:padA, padB:padB, heliPath:heliPath,
+          gA:d2a.geom, gB:d2b.geom, tfrNote:tfrNote};
   }
 
   // best ground time
@@ -1478,11 +1748,18 @@ async function computeMultiModal(pA, pB) {
   else
     routeLayers.push(L.polyline([[pA.lat,pA.lng],[pB.lat,pB.lng]],{color:'#ef4444',weight:5,opacity:0.7,dashArray:'6 4'}).addTo(map));
 
-  // ── draw GREEN+CYAN: aerial route ─────────────────────────────────────────
+  // ── draw GREEN+CYAN: aerial route (multi-hop arc when TFR-avoiding) ─────────
   if(heli) {
     if(heli.gA) routeLayers.push(L.geoJSON(heli.gA,{style:{color:'#22c55e',weight:4,opacity:0.9}}).addTo(map));
-    routeLayers.push(L.polyline([[heli.padA.lat,heli.padA.lon],[heli.padB.lat,heli.padB.lon]],
-      {color:'#00d4ff',weight:3,dashArray:'10 6',opacity:0.95}).addTo(map));
+    // Helicopter path — one or more segments via intermediate helipads
+    var hCoords=heli.heliPath.map(function(p){return[p.lat,p.lon];});
+    routeLayers.push(L.polyline(hCoords,{color:'#00d4ff',weight:3,dashArray:'10 6',opacity:0.95}).addTo(map));
+    // Intermediate waypoint markers (not takeoff or landing)
+    for(var mi=1;mi<heli.heliPath.length-1;mi++){
+      var wp=heli.heliPath[mi];
+      routeLayers.push(L.marker([wp.lat,wp.lon],{icon:hIcon('#00b8d9'),zIndexOffset:400})
+        .bindTooltip('Via: '+wp.name,{direction:'top'}).addTo(map));
+    }
     if(heli.gB) routeLayers.push(L.geoJSON(heli.gB,{style:{color:'#22c55e',weight:4,opacity:0.9}}).addTo(map));
     routeLayers.push(L.marker([heli.padA.lat,heli.padA.lon],{icon:hIcon('#00b8d9'),zIndexOffset:500})
       .bindTooltip('Take-off: '+heli.padA.name,{direction:'top'}).addTo(map));
@@ -1492,7 +1769,7 @@ async function computeMultiModal(pA, pB) {
 
   // ── fit bounds ────────────────────────────────────────────────────────────
   var pts=[pA,pB];
-  if(heli){pts.push(L.latLng(heli.padA.lat,heli.padA.lon));pts.push(L.latLng(heli.padB.lat,heli.padB.lon));}
+  if(heli){heli.heliPath.forEach(function(p){pts.push(L.latLng(p.lat,p.lon));});}
   map.fitBounds(L.latLngBounds(pts),{padding:[50,50]});
 
   // ── table ─────────────────────────────────────────────────────────────────
@@ -1502,8 +1779,19 @@ async function computeMultiModal(pA, pB) {
     {name:'&#x1F695; Taxi',            dur:taxiDur,    dist:driveR.dist, air:'&mdash;', ground:true, note:'est.'},
     {name:'&#x1F68C; Transit/Subway',  dur:transitDur, dist:driveR.dist, air:'&mdash;', ground:true, note:'est.'},
   ];
+  // Precipitation warning badge — browser-side NWS WMS sample (2 req, ~0.1 s)
+  var heliWx = '';
+  if(heli && weatherThresholds) {
+    var padIntensity = await samplePrecip(heli.padA.lat, heli.padA.lon);
+    var thr = weatherThresholds.helicopter;
+    if(padIntensity >= thr.avoid)
+      heliWx = ' <span style="color:#ef4444;font-size:11px">⛈ Severe precip — not recommended</span>';
+    else if(padIntensity >= thr.warn)
+      heliWx = ' <span style="color:#eab308;font-size:11px">🌧 Rain detected at departure pad</span>';
+  }
+
   if(heli) rows.push({
-    name:'&#x1F697;&#x2708; Car + Heli + Car',
+    name:'&#x1F697;&#x2708; Car + Heli + Car' + heliWx + (heli.tfrNote||''),
     dur:heli.dur, dist:heli.dist,
     air:fmtDist(heli.hd)+' &middot; '+fmtDur(heli.hDur), ground:false
   });
@@ -1530,7 +1818,14 @@ async function computeMultiModal(pA, pB) {
 
 // ── Helipad-to-helipad Dijkstra ───────────────────────────────────────────────
 function findRoute(start,end,allPts) {
-  var nodes=[{lat:start.lat,lon:start.lng,name:'Origin'}].concat(allPts).concat([{lat:end.lat,lon:end.lng,name:'Destination'}]);
+  // Bound the graph to a corridor around the route — prevents O(N²) explosion
+  // with 2000+ helipad pools. 1.5°lat (~165 km) / 2.5°lon (~220 km) buffer is
+  // more than enough for a TFR detour in the NE US.
+  var bufLat=1.5,bufLon=2.5;
+  var minLat=Math.min(start.lat,end.lat)-bufLat, maxLat=Math.max(start.lat,end.lat)+bufLat;
+  var minLon=Math.min(start.lng,end.lng)-bufLon, maxLon=Math.max(start.lng,end.lng)+bufLon;
+  var nearby=allPts.filter(function(p){return p.lat>=minLat&&p.lat<=maxLat&&p.lon>=minLon&&p.lon<=maxLon;});
+  var nodes=[{lat:start.lat,lon:start.lng,name:'Origin'}].concat(nearby).concat([{lat:end.lat,lon:end.lng,name:'Destination'}]);
   var N=nodes.length, dst=N-1, dist=[], prev=[];
   for(var i=0;i<N;i++){dist.push(Infinity);prev.push(-1);}
   dist[0]=0; var heap=[[0,0]];
@@ -1542,6 +1837,18 @@ function findRoute(start,end,allPts) {
       if(v===u)continue;
       var d=haversine(nodes[u].lat,nodes[u].lon,nodes[v].lat,nodes[v].lon);
       if(d>RANGE_KM)continue;
+      // Skip edge if any corridor sample point falls inside an active TFR
+      if(map.hasLayer(notamLayer)){
+        var edgeBlocked=false;
+        for(var tk=1;tk<=4;tk++){
+          var tt=tk/5;
+          if(isInActiveTFR(
+            nodes[u].lat+tt*(nodes[v].lat-nodes[u].lat),
+            nodes[u].lon+tt*(nodes[v].lon-nodes[u].lon)
+          )){edgeBlocked=true;break;}
+        }
+        if(edgeBlocked) continue;
+      }
       var nc=dist[u]+d; if(nc<dist[v]){dist[v]=nc;prev[v]=u;heap.push([nc,v]);}
     }
   }
@@ -1608,7 +1915,9 @@ map.on('click', async function(e){
     ptB=e.latlng; if(mkB)map.removeLayer(mkB);
     mkB=L.marker(ptB,{icon:flagIcon('#1565C0','B'),zIndexOffset:1000}).addTo(map);
     sb.style.display='none'; clickState=0;
-    drawHeliRoute(findRoute(ptA,ptB,getAllHelipads()));
+    var hpts=getAllHelipads();
+    if(!hpts.length){alert('No helipad layers visible. Enable at least one helipad layer to route.');return;}
+    drawHeliRoute(findRoute(ptA,ptB,hpts));
   } else if(clickState===10){
     ptA=e.latlng; if(mkA)map.removeLayer(mkA);
     mkA=L.marker(ptA,{icon:flagIcon('#ef4444','A'),zIndexOffset:1000}).addTo(map);
@@ -1619,12 +1928,31 @@ map.on('click', async function(e){
     clickState=0; await computeMultiModal(ptA,ptB);
   }
 });
+
+// ── Auto-trigger from Route Assistant (injected at build time by Python) ──────
+// __INIT_A__ and __INIT_B__ are replaced with {lat,lng} objects or null.
+(function(){
+  var _ia=__INIT_A__, _ib=__INIT_B__;
+  if(!_ia||!_ib) return;
+  setTimeout(async function(){
+    ptA=L.latLng(_ia.lat,_ia.lng); ptB=L.latLng(_ib.lat,_ib.lng);
+    if(mkA) map.removeLayer(mkA);
+    if(mkB) map.removeLayer(mkB);
+    mkA=L.marker(ptA,{icon:flagIcon('#ef4444','A'),zIndexOffset:1000}).addTo(map);
+    mkB=L.marker(ptB,{icon:flagIcon('#1565C0','B'),zIndexOffset:1000}).addTo(map);
+    await computeMultiModal(ptA,ptB);
+  },1800);
+})();
 </script>
 </body>
 </html>"""
 
 
-def build_routing_html(faa_df: pd.DataFrame, osm_df: pd.DataFrame) -> str:
+@st.cache_data(ttl=300, show_spinner=False)
+def build_routing_html(faa_df: pd.DataFrame, osm_df: pd.DataFrame, js_v: str = "m4.17", tomtom_key: str = "",
+                       mapbox_token: str = "",
+                       init_lat_a: float = 0.0, init_lon_a: float = 0.0,
+                       init_lat_b: float = 0.0, init_lon_b: float = 0.0) -> str:
     """Build self-contained Leaflet routing HTML with FAA and OSM helipads injected as GeoJSON.
 
     Args:
@@ -1634,33 +1962,55 @@ def build_routing_html(faa_df: pd.DataFrame, osm_df: pd.DataFrame) -> str:
     Returns:
         Complete HTML string for use with streamlit.components.v1.html().
     """
-    faa_features = []
-    for _, row in faa_df.dropna(subset=["lat", "lon"]).iterrows():
-        props: dict = {}
-        for col in ["IDENT", "NAME", "STATE", "SERVCITY", "OPERSTATUS", "ELEVATION"]:
-            if col in row.index:
-                v = row[col]
-                props[col] = str(v) if pd.notna(v) else ""
-        faa_features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point",
-                         "coordinates": [float(row["lon"]), float(row["lat"])]},
-            "properties": props,
+    # Build GeoJSON using vectorized to_dict() — 20-50× faster than iterrows()
+    _faa_cols = [c for c in ["IDENT", "NAME", "STATE", "SERVCITY", "OPERSTATUS", "ELEVATION"]
+                 if c in faa_df.columns]
+    _faa = faa_df.dropna(subset=["lat", "lon"])[_faa_cols + ["lat", "lon"]].copy()
+    for c in _faa_cols:
+        _faa[c] = _faa[c].where(_faa[c].notna(), "").astype(str)
+    faa_features = [
+        {"type": "Feature",
+         "geometry": {"type": "Point", "coordinates": [r["lon"], r["lat"]]},
+         "properties": {c: r[c] for c in _faa_cols}}
+        for r in _faa.to_dict(orient="records")
+    ]
+
+    _osm_cols = [c for c in ["name", "faa", "surface", "ele", "osm_id", "aeroway"]
+                 if c in osm_df.columns]
+    _osm = osm_df.dropna(subset=["lat", "lon"])[_osm_cols + ["lat", "lon"]].copy()
+    for c in _osm_cols:
+        _osm[c] = _osm[c].where(_osm[c].notna(), "").astype(str)
+    osm_features = [
+        {"type": "Feature",
+         "geometry": {"type": "Point", "coordinates": [r["lon"], r["lat"]]},
+         "properties": {c: r[c] for c in _osm_cols}}
+        for r in _osm.to_dict(orient="records")
+    ]
+
+    # HIE-validated subset (gt=1 from inspector_results.csv)
+    _insp_path = DATA_DIR / "inspector_results.csv"
+    validated_geojson = '{"type":"FeatureCollection","features":[]}'
+    if _insp_path.exists():
+        _insp = pd.read_csv(_insp_path)
+        _val_idents = set(_insp[_insp["gt"] == 1]["ident"].str.upper())
+        _val_cols = [c for c in ["IDENT", "NAME", "STATE", "SERVCITY"] if c in faa_df.columns]
+        _val = faa_df[faa_df["IDENT"].isin(_val_idents)].dropna(subset=["lat", "lon"])
+        _val = _val[_val_cols + ["lat", "lon"]].copy()
+        for c in _val_cols:
+            _val[c] = _val[c].where(_val[c].notna(), "").astype(str)
+        validated_geojson = json.dumps({
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature",
+                 "geometry": {"type": "Point", "coordinates": [r["lon"], r["lat"]]},
+                 "properties": {c: r[c] for c in _val_cols}}
+                for r in _val.to_dict(orient="records")
+            ]
         })
 
-    osm_features = []
-    for _, row in osm_df.dropna(subset=["lat", "lon"]).iterrows():
-        props = {}
-        for col in ["name", "faa", "surface", "ele", "osm_id", "aeroway"]:
-            if col in row.index:
-                v = row[col]
-                props[col] = str(v) if pd.notna(v) else ""
-        osm_features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point",
-                         "coordinates": [float(row["lon"]), float(row["lat"])]},
-            "properties": props,
-        })
+    # TFR GeoJSON for JS routing checks
+    tfrs = _get_active_tfrs()
+    notam_geojson = json.dumps(tfrs_to_geojson(tfrs))
 
     faa_geojson = json.dumps({"type": "FeatureCollection", "features": faa_features})
     osm_geojson = json.dumps({"type": "FeatureCollection", "features": osm_features})
@@ -1668,6 +2018,13 @@ def build_routing_html(faa_df: pd.DataFrame, osm_df: pd.DataFrame) -> str:
         _ROUTING_HTML_TEMPLATE
         .replace("__GEOJSON__", faa_geojson)
         .replace("__OSM_GEOJSON__", osm_geojson)
+        .replace("__VALIDATED_GEOJSON__", validated_geojson)
+        .replace("__NOTAM_GEOJSON__", notam_geojson)
+        .replace("__WEATHER_THRESHOLDS__", json.dumps(PRECIP_THRESHOLDS))
+        .replace("__TOMTOM_API_KEY__", tomtom_key)
+        .replace("__MAPBOX_TOKEN__", mapbox_token)
+        .replace("__INIT_A__", json.dumps({"lat": init_lat_a, "lng": init_lon_a}) if init_lat_a else "null")
+        .replace("__INIT_B__", json.dumps({"lat": init_lat_b, "lng": init_lon_b}) if init_lat_b else "null")
     )
 
 
@@ -1777,6 +2134,71 @@ with tab_eda:
                 ).add_to(clust)
             clust.add_to(grp)
             grp.add_to(m)
+
+        # ── Traffic basemap (Mapbox traffic-day-v2 style — green/yellow/red roads) ──
+        # Added as a basemap (not overlay) because the v4 raster overlay API is deprecated.
+        _mapbox_tk = os.getenv("MAPBOX_TOKEN", "")
+        if _mapbox_tk:
+            folium.TileLayer(
+                tiles=(
+                    f"https://api.mapbox.com/styles/v1/mapbox/traffic-day-v2"
+                    f"/tiles/256/{{z}}/{{x}}/{{y}}?access_token={_mapbox_tk}"
+                ),
+                attr='© <a href="https://www.mapbox.com">Mapbox</a>',
+                name="Traffic (Mapbox)",
+                overlay=False, control=True, show=False,
+            ).add_to(m)
+
+        # ── Precipitation radar (NWS radar.weather.gov) ───────────────────────
+        folium.WmsTileLayer(**get_nws_wms_kwargs()).add_to(m)
+
+        # ── Active TFRs ────────────────────────────────────────────────────────
+        tfrs = _get_active_tfrs()
+        if tfrs:
+            tfr_group = folium.FeatureGroup(name="TFRs — Active airspace closures", show=False)
+            for tfr in tfrs:
+                coords = tfr.get("coordinates", [])
+                tip = tfr.get("text", "TFR")[:80]
+                if tfr.get("geometry_type") == "Polygon" and len(coords) >= 3:
+                    folium.Polygon(
+                        locations=coords, color="red", weight=2,
+                        fill=True, fill_opacity=0.15, fill_color="red",
+                        tooltip=tip,
+                        popup=folium.Popup(tfr.get("text", "TFR"), max_width=280),
+                    ).add_to(tfr_group)
+                elif coords:
+                    folium.CircleMarker(
+                        location=coords[0], radius=8, color="red",
+                        fill=True, fill_opacity=0.4,
+                        tooltip=tip,
+                        popup=folium.Popup(tfr.get("text", "TFR"), max_width=280),
+                    ).add_to(tfr_group)
+            tfr_group.add_to(m)
+
+        # ── METAR weather stations (NE US bounding box) ────────────────────────
+        metar_obs = _get_metar_bbox(38.0, -76.5, 45.5, -69.5)
+        if metar_obs:
+            _cat_color = {"VFR": "#22c55e", "MVFR": "#eab308", "IFR": "#ef4444", "LIFR": "#a855f7"}
+            wx_group = folium.FeatureGroup(name="METAR weather stations", show=False)
+            for obs in metar_obs:
+                if not obs.get("lat") or not obs.get("lon"):
+                    continue
+                cat = obs.get("fltCat", "VFR")
+                color = _cat_color.get(cat, "#94a3b8")
+                raw = obs.get("rawOb", "")
+                popup_html = (
+                    f'<b>{obs.get("icaoId","")}</b> — '
+                    f'<span style="color:{color}">{cat}</span><br>'
+                    f'<small>{raw[:80]}</small>'
+                )
+                folium.CircleMarker(
+                    location=[obs["lat"], obs["lon"]],
+                    radius=8, color=color, fill=True, fill_color=color,
+                    fill_opacity=0.75, weight=2,
+                    popup=folium.Popup(popup_html, max_width=260),
+                    tooltip=f'{obs.get("icaoId","")} {cat}',
+                ).add_to(wx_group)
+            wx_group.add_to(m)
 
         folium.LayerControl(collapsed=False).add_to(m)
 
@@ -2892,7 +3314,22 @@ st.caption(
     "or the compass button for a full multi-modal comparison. "
     "Uses existing FAA helipad data + OSRM public API."
 )
-components.html(build_routing_html(faa_raw, osm_raw), height=650, scrolling=False)
+_tomtom_key   = os.getenv("TOMTOM_API_KEY", "")   # routing API (not traffic tiles)
+_mapbox_token = os.getenv("MAPBOX_TOKEN", "")      # traffic-day-v2 basemap
+_ar = st.session_state.get("_agent_last_route")
+_sim_kwargs: dict = dict(
+    js_v="m4.17",
+    tomtom_key=_tomtom_key,
+    mapbox_token=_mapbox_token,
+)
+if _ar and _ar.get("origin") and _ar.get("destination"):
+    _sim_kwargs.update(
+        init_lat_a=_ar["origin"]["lat"],  init_lon_a=_ar["origin"]["lon"],
+        init_lat_b=_ar["destination"]["lat"], init_lon_b=_ar["destination"]["lon"],
+    )
+components.html(
+    build_routing_html(faa_raw, osm_raw, **_sim_kwargs),
+    height=650, scrolling=False)
 
 st.divider()
 st.caption("SkyRoute HIE · Technion LBS Course 016833 · FAA ADDS-ArcGIS + OpenStreetMap")
@@ -2914,6 +3351,22 @@ _INSP_B_SOURCES: dict[str, str] = {
     "FAA — CONUS (3 000+)":       "faa_national",
     "OSM — NE US (1 500+)":       "osm_neus",
 }
+
+
+@st.cache_data
+def _load_osm_validated() -> pd.DataFrame | None:
+    """Load osm_validated.csv produced by scripts/validate_osm_only.py."""
+    path = DATA_DIR / "osm_validated.csv"
+    if not path.exists():
+        return None
+    df = pd.read_csv(path)
+    for col in ("lat", "lon", "hie_confidence", "hie_offset_m"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["hie_visual_detected"] = df["hie_visual_detected"].astype(bool)
+    df["osm_id"] = df["osm_id"].astype(str)
+    df["name"] = df["name"].fillna("").astype(str)
+    return df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
 
 @st.cache_data
@@ -3037,12 +3490,13 @@ def _inspector_content() -> None:
 
     insp_mode = st.radio(
         "Mode",
-        ["🔬 Test Set Inspector", "📡 Live Inference"],
+        ["🔬 Test Set Inspector", "📡 Live Inference", "🗺️ OSM Inspector"],
         horizontal=True,
         key="_insp_mode",
         help=(
             "Test Set Inspector: select a helipad from the dropdown — chip loads automatically. "
-            "Live Inference: pan/zoom the map freely; each move fetches a fresh 100 m chip and runs YOLO."
+            "Live Inference: pan/zoom the map freely; click a marker to fetch a chip and run YOLO. "
+            "OSM Inspector: browse OSM-only NE US pads validated by the HIE pipeline — Prev/Next or map click."
         ),
     )
     st.divider()
@@ -3159,7 +3613,7 @@ if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);}
     # ══════════════════════════════════════════════════════════════════════════
     # MODE B — Live Inference
     # ══════════════════════════════════════════════════════════════════════════
-    else:
+    elif insp_mode == "📡 Live Inference":
         st.caption(
             "Select a helipad dataset — markers are shown on the map. "
             "Click a marker or pan the map to fetch a 100 m × 100 m chip at that location and run YOLO. "
@@ -3179,20 +3633,21 @@ if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);}
             imagery_b = st.radio(
                 "Imagery source",
                 ["NAIP only", "ESRI only", "NAIP + ESRI"],
+                index=2,
                 help="NAIP = training domain  ·  ESRI = domain-shift comparison",
                 key="_insp_b_imagery",
             )
             auto_infer_b = st.checkbox(
-                "Auto-fetch on map move",
+                "Auto-fetch on marker click",
                 value=True,
                 key="_insp_b_auto",
-                help="Uncheck to navigate the map without triggering a fetch on every pan.",
+                help="When checked, clicking a helipad marker immediately fetches its chip and runs YOLO.",
             )
             conf_b = st.slider("Confidence threshold", 0.0, 1.0, 0.50, 0.05, key="_insp_b_thr")
 
             st.divider()
-            lat_b_now = st.session_state.get("_insp_b_lat", 40.7503)
-            lon_b_now = st.session_state.get("_insp_b_lon", -74.0025)
+            lat_b_now = st.session_state.get("_insp_b_lat", 40.843194)
+            lon_b_now = st.session_state.get("_insp_b_lon", -75.205319)
             st.caption(f"Centre: {lat_b_now:.4f}°N  {abs(lon_b_now):.4f}°W")
             if st.button("Run Inference Here", use_container_width=True, key="_insp_b_run"):
                 st.session_state["_insp_b_force"] = True
@@ -3274,30 +3729,25 @@ n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();
 if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);},400);})();</script>"""))
 
             map_out_b = st_folium(m_b, key=f"insp_b_map_{ver_b}", width=None, height=390,
-                                  returned_objects=["center", "zoom", "last_object_clicked"])
+                                  returned_objects=["last_object_clicked"])
 
             # ── Determine inference target ────────────────────────────────────
+            # Pan/zoom no longer triggers a rerun — only marker clicks and the
+            # "Run Inference Here" button fire inference.
             force_b = st.session_state.get("_insp_b_force", False)
             if force_b:
                 del st.session_state["_insp_b_force"]
 
             new_lat_b, new_lng_b = lat_b_now, lon_b_now
             if map_out_b:
-                if map_out_b.get("center"):
-                    new_lat_b = map_out_b["center"]["lat"]
-                    new_lng_b = map_out_b["center"]["lng"]
-                # Marker click overrides pan centre and forces inference
                 clicked_b = map_out_b.get("last_object_clicked")
                 if clicked_b and isinstance(clicked_b, dict) and "lat" in clicked_b:
                     new_lat_b = float(clicked_b["lat"])
                     new_lng_b = float(clicked_b.get("lng", new_lng_b))
-                    force_b   = True
+                    if auto_infer_b:
+                        force_b = True
 
-            last_b   = st.session_state.get("_insp_b_inferred_at", (None, None))
-            moved_b  = (last_b[0] is None
-                        or abs(new_lat_b - last_b[0]) > 0.0003
-                        or abs(new_lng_b - last_b[1]) > 0.0003)
-            do_infer = force_b or (auto_infer_b and moved_b)
+            do_infer = force_b
 
             if do_infer:
                 if imagery_b in ("NAIP only", "NAIP + ESRI"):
@@ -3342,6 +3792,340 @@ if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);}
                               caption=f"ESRI World Imagery — domain shift  |  conf={re['confidence']:.3f}")
                 else:
                     img_cols_b[ci].caption("Click a helipad marker or pan to fetch an ESRI chip.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # MODE C — OSM Inspector
+    # ══════════════════════════════════════════════════════════════════════════
+    elif insp_mode == "🗺️ OSM Inspector":
+        st.caption(
+            "Browse OSM-only NE US helipads validated by the HIE pipeline.  "
+            "🟢 Green = YOLO confirmed · 🔴 Red = not detected.  "
+            "Navigate with Prev / Next or click any marker on the map."
+        )
+
+        osm_val = _load_osm_validated()
+        if osm_val is None or osm_val.empty:
+            st.warning(
+                "No OSM validation data found.  \n"
+                "Run:  `python scripts/validate_osm_only.py`"
+            )
+        else:
+            # ── filter ────────────────────────────────────────────────────────
+            filt_c, count_c = st.columns([3, 1])
+            filter_val = filt_c.radio(
+                "Filter",
+                ["All", "✅ Detected", "❌ Not Detected"],
+                horizontal=True,
+                key="_insp_c_filter",
+            )
+
+            # Reset index when filter changes
+            if st.session_state.get("_insp_c_last_filter") != filter_val:
+                st.session_state["_insp_c_idx"]    = 0
+                st.session_state["_insp_c_chip"]   = None
+                st.session_state["_insp_c_result"] = None
+            st.session_state["_insp_c_last_filter"] = filter_val
+
+            if filter_val == "✅ Detected":
+                df_c = osm_val[osm_val["hie_visual_detected"]].reset_index(drop=True)
+            elif filter_val == "❌ Not Detected":
+                df_c = osm_val[~osm_val["hie_visual_detected"]].reset_index(drop=True)
+            else:
+                df_c = osm_val.copy()
+
+            n_c = len(df_c)
+            count_c.markdown(
+                f"<div style='text-align:right;padding-top:28px;color:#94a3b8'>"
+                f"{n_c:,} pads</div>",
+                unsafe_allow_html=True,
+            )
+
+            if n_c == 0:
+                st.info("No records match the current filter.")
+            else:
+                idx_c = int(st.session_state.get("_insp_c_idx", 0)) % n_c
+
+                # ── navigation row ────────────────────────────────────────────
+                nav1, nav2, nav3 = st.columns([1, 2, 1])
+                if nav1.button("◀  Prev", use_container_width=True, key="_insp_c_prev"):
+                    idx_c = (idx_c - 1) % n_c
+                    st.session_state.update({
+                        "_insp_c_idx": idx_c,
+                        "_insp_c_chip": None, "_insp_c_result": None,
+                    })
+                nav2.markdown(
+                    f"<div style='text-align:center;font-size:15px;padding-top:8px'>"
+                    f"<b>{idx_c + 1}</b> / {n_c}</div>",
+                    unsafe_allow_html=True,
+                )
+                if nav3.button("Next  ▶", use_container_width=True, key="_insp_c_next"):
+                    idx_c = (idx_c + 1) % n_c
+                    st.session_state.update({
+                        "_insp_c_idx": idx_c,
+                        "_insp_c_chip": None, "_insp_c_result": None,
+                    })
+
+                row_c     = df_c.iloc[idx_c]
+                lat_c     = float(row_c["lat"])
+                lon_c     = float(row_c["lon"])
+                name_c    = row_c["name"] or "Unnamed"
+                osm_id_c  = row_c["osm_id"]
+                detected_c = bool(row_c["hie_visual_detected"])
+                conf_csv_c = float(row_c.get("hie_confidence", 0.0) or 0.0)
+                offset_c   = row_c.get("hie_offset_m")
+
+                # ── auto-fetch chip when index changes ────────────────────────
+                if st.session_state.get("_insp_c_last_idx") != idx_c or \
+                   st.session_state.get("_insp_c_chip") is None:
+                    st.session_state["_insp_c_last_idx"] = idx_c
+                    st.session_state["_insp_c_ver"] = (
+                        st.session_state.get("_insp_c_ver", 0) + 1
+                    )
+                    with st.spinner("Fetching NAIP chip…"):
+                        _chip_c = fetch_naip_chip(lat_c, lon_c)
+                    if _chip_c is not None:
+                        _res_c = detect_yolo(_chip_c, insp_model)
+                        st.session_state["_insp_c_chip"]   = _chip_c
+                        st.session_state["_insp_c_result"] = _res_c
+                    else:
+                        st.session_state["_insp_c_chip"]   = None
+                        st.session_state["_insp_c_result"] = None
+
+                chip_c   = st.session_state.get("_insp_c_chip")
+                result_c = st.session_state.get("_insp_c_result")
+                thr_c    = st.slider(
+                    "Confidence threshold", 0.50, 1.0, 0.50, 0.05, key="_insp_c_thr"
+                )
+
+                st.divider()
+                col_chip_c, col_map_c = st.columns([1, 2], gap="medium")
+
+                # ── left: chip ────────────────────────────────────────────────
+                with col_chip_c:
+                    if chip_c is not None and result_c is not None:
+                        live_conf  = result_c["confidence"]
+                        live_det   = result_c["detected"] and live_conf >= thr_c
+                        batch_det  = detected_c
+
+                        if live_det:
+                            st.success(f"LIVE ✅ Detected  conf = {live_conf:.3f}")
+                        else:
+                            st.info(f"LIVE ❌ No detection above {thr_c:.2f}")
+
+                        # Flag disagreement between live YOLO and stored batch result
+                        if live_det and not batch_det:
+                            st.warning(
+                                "Batch HIE said **not detected** — live YOLO disagrees. "
+                                "Possible: low-confidence detection (0.25–0.49 in batch) "
+                                "or imagery change."
+                            )
+                        elif not live_det and batch_det:
+                            st.warning(
+                                f"Batch HIE said **detected** (conf {conf_csv_c:.3f}) "
+                                "but live YOLO is below threshold at current slider setting."
+                            )
+
+                        _show_pil(
+                            col_chip_c,
+                            draw_detection(chip_c, result_c,
+                                           source_label="NAIP", conf_threshold=thr_c),
+                            caption=f"NAIP · {name_c[:40]}",
+                        )
+                    elif chip_c is None:
+                        st.warning("NAIP imagery not available for this location")
+                    else:
+                        st.caption("Fetching…")
+
+                # ── right: info card + map ────────────────────────────────────
+                with col_map_c:
+                    status_color = "#22c55e" if detected_c else "#ef4444"
+                    offset_html  = (
+                        f"<br><span style='color:#94a3b8'>Offset:</span> {offset_c:.1f} m"
+                        if detected_c and pd.notna(offset_c) else ""
+                    )
+                    # OSM URL — node vs way depends on osm_type in original data
+                    _osm_url = f"https://www.openstreetmap.org/node/{osm_id_c}"
+                    st.markdown(
+                        f"<div style='background:#0f172a;border:1px solid #1e2a3a;"
+                        f"border-radius:8px;padding:12px 16px;margin-bottom:10px;"
+                        f"font-size:13px;line-height:1.7'>"
+                        f"<b style='font-size:15px'>"
+                        f"{name_c if name_c and name_c != 'Unnamed' else '(unnamed)'}"
+                        f"</b><br>"
+                        f"<span style='color:#94a3b8'>OSM:</span> "
+                        f"<a href='{_osm_url}' target='_blank' style='color:#64B5F6'>"
+                        f"node/{osm_id_c}</a><br>"
+                        f"<span style='color:#94a3b8'>Coords:</span> "
+                        f"{lat_c:.5f}°N &nbsp; {abs(lon_c):.5f}°W<br>"
+                        f"<span style='color:#94a3b8'>Batch HIE:</span> "
+                        f"<span style='color:{status_color}'>"
+                        f"{'✅ Detected' if detected_c else '❌ Not detected'} "
+                        f"(conf {conf_csv_c:.3f})</span>"
+                        f"{offset_html}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                    # Folium map — current pad + nearby pads (within 0.5°)
+                    ver_c = st.session_state.get("_insp_c_ver", 0)
+                    nearby_c = df_c[
+                        ((df_c["lat"] - lat_c) ** 2 + (df_c["lon"] - lon_c) ** 2) <= 0.25
+                    ]
+
+                    m_c = folium.Map(
+                        location=[lat_c, lon_c], zoom_start=13, tiles=None, max_zoom=20
+                    )
+                    folium.TileLayer(
+                        "CartoDB dark_matter", name="Dark",
+                        overlay=False, control=False, show=True,
+                    ).add_to(m_c)
+                    folium.TileLayer(
+                        "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                        attr="OSM", name="Street map",
+                        overlay=False, control=True, show=False,
+                    ).add_to(m_c)
+
+                    for _, r in nearby_c.iterrows():
+                        is_cur  = str(r["osm_id"]) == osm_id_c
+                        is_det  = bool(r["hie_visual_detected"])
+                        color   = "#22c55e" if is_det else "#ef4444"
+                        radius  = 9 if is_cur else 5
+                        opacity = 1.0 if is_cur else 0.6
+                        tip     = f'{"→ " if is_cur else ""}{r["name"] or r["osm_id"]}'
+                        folium.CircleMarker(
+                            location=[float(r["lat"]), float(r["lon"])],
+                            radius=radius, color=color,
+                            fill=True, fill_color=color,
+                            fill_opacity=opacity, weight=3 if is_cur else 1,
+                            tooltip=tip,
+                        ).add_to(m_c)
+
+                    folium.LayerControl(collapsed=True).add_to(m_c)
+                    m_c.get_root().html.add_child(_BE(
+                        """<script>(function(){var n=0,iv=setInterval(function(){
+n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();
+if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);},400);})();
+</script>"""
+                    ))
+
+                    map_out_c = st_folium(
+                        m_c, key=f"insp_c_map_{ver_c}",
+                        width=None, height=310,
+                        returned_objects=["last_object_clicked"],
+                    )
+
+                    # Map click → navigate to nearest pad in filtered set
+                    if map_out_c and map_out_c.get("last_object_clicked"):
+                        click = map_out_c["last_object_clicked"]
+                        if isinstance(click, dict) and "lat" in click:
+                            clat = float(click["lat"])
+                            clon = float(click.get("lng", lon_c))
+                            dists = (df_c["lat"] - clat) ** 2 + (df_c["lon"] - clon) ** 2
+                            new_idx = int(dists.to_numpy().argmin())
+                            if new_idx != idx_c:
+                                st.session_state.update({
+                                    "_insp_c_idx":   new_idx,
+                                    "_insp_c_chip":  None,
+                                    "_insp_c_result": None,
+                                })
+                                st.rerun()
+
+                    # ── Verify location ───────────────────────────────────────
+                    with st.expander("Verify location — query what's here"):
+                        _q_key = (osm_id_c, round(lat_c, 5), round(lon_c, 5))
+                        if st.session_state.get("_insp_c_q_key") != _q_key:
+                            st.session_state["_insp_c_q_key"]    = _q_key
+                            st.session_state["_insp_c_q_result"] = None
+
+                        if st.button("Query Nominatim + Overpass", key="_insp_c_query_btn"):
+                            _q_res = {}
+                            _hdr = {"User-Agent": "SkyRoute/1.0 helipad-inspector"}
+
+                            # Nominatim reverse geocode
+                            try:
+                                _r = requests.get(
+                                    "https://nominatim.openstreetmap.org/reverse",
+                                    params={"lat": lat_c, "lon": lon_c,
+                                            "format": "json", "zoom": 18,
+                                            "addressdetails": 1},
+                                    headers=_hdr, timeout=10,
+                                )
+                                if _r.ok:
+                                    _nom = _r.json()
+                                    _q_res["display_name"] = _nom.get("display_name", "")
+                                    _q_res["address"] = _nom.get("address", {})
+                                    _q_res["osm_type"] = _nom.get("osm_type", "")
+                                    _q_res["osm_id_nom"] = _nom.get("osm_id", "")
+                                    _q_res["category"] = _nom.get("category", "")
+                                    _q_res["type_nom"] = _nom.get("type", "")
+                            except Exception:
+                                pass
+
+                            # Overpass: aeroway/helipad/hospital within 300m
+                            try:
+                                _op_q = (
+                                    f"[out:json][timeout:10];"
+                                    f"("
+                                    f'node["aeroway"](around:300,{lat_c},{lon_c});'
+                                    f'node["amenity"="hospital"](around:500,{lat_c},{lon_c});'
+                                    f'node["amenity"="clinic"](around:300,{lat_c},{lon_c});'
+                                    f'way["aeroway"](around:300,{lat_c},{lon_c});'
+                                    f'way["building"="hospital"](around:300,{lat_c},{lon_c});'
+                                    f");out tags;"
+                                )
+                                _r2 = requests.post(
+                                    "https://overpass-api.de/api/interpreter",
+                                    data={"data": _op_q},
+                                    headers=_hdr, timeout=15,
+                                )
+                                if _r2.ok:
+                                    _q_res["nearby"] = _r2.json().get("elements", [])
+                            except Exception:
+                                _q_res["nearby"] = []
+
+                            st.session_state["_insp_c_q_result"] = _q_res
+
+                        _q = st.session_state.get("_insp_c_q_result")
+                        if _q:
+                            if _q.get("display_name"):
+                                st.markdown(
+                                    f"**Address:** {_q['display_name']}<br>"
+                                    f"**Category:** {_q.get('category','—')} / {_q.get('type_nom','—')}",
+                                    unsafe_allow_html=True,
+                                )
+                                _addr = _q.get("address", {})
+                                _interesting = {k: v for k, v in _addr.items()
+                                                if k not in ("country", "country_code",
+                                                             "postcode", "state_district")}
+                                if _interesting:
+                                    st.json(_interesting)
+
+                            _nearby = _q.get("nearby", [])
+                            if _nearby:
+                                st.markdown(f"**Nearby OSM features ({len(_nearby)}):**")
+                                for _el in _nearby[:12]:
+                                    _tags = _el.get("tags", {})
+                                    _label = (
+                                        _tags.get("name") or
+                                        _tags.get("aeroway") or
+                                        _tags.get("amenity") or
+                                        _tags.get("building") or
+                                        f"[{_el.get('type','?')} {_el.get('id','')}]"
+                                    )
+                                    _detail = ", ".join(
+                                        f"{k}={v}" for k, v in _tags.items()
+                                        if k not in ("name",) and len(k) < 20
+                                    )[:80]
+                                    st.markdown(f"- **{_label}** — {_detail}")
+                            elif _q:
+                                st.info("No aeroway / hospital features found within 500 m.")
+
+                        st.markdown(
+                            f"[Open in OpenStreetMap]({_osm_url})  ·  "
+                            f"[Overpass Turbo](https://overpass-turbo.eu/?Q="
+                            f"node%28around%3A200%2C{lat_c}%2C{lon_c}%29%5B%22aeroway%22%5D%3B"
+                            f"out%3B)",
+                            unsafe_allow_html=False,
+                        )
 
 
 with tab_inspector:
@@ -3605,3 +4389,396 @@ with tab_results:
                     for _ej, (_ef, _et) in enumerate(_available[_pi:_pi+2]):
                         _ec[_ej].markdown(f"**{_et}**")
                         _safe_image(_ec[_ej], _ind_dir / _ef)
+
+
+def _mly_viewer_html(lat: float, lon: float, height: int = 260,
+                     image_id: str = "", thumb_url: str = "") -> str:
+    """Satellite map + Mapillary street-view thumbnail for a booking leg location.
+
+    Satellite tab (default): ESRI World Imagery via Leaflet.
+    Street View tab: shows a pre-fetched Mapillary JPEG thumbnail (fetched server-side,
+    so no CORS / WebGL / sandbox issues).  Falls back to a Mapillary app link if
+    thumb_url is empty.
+
+    Args:
+        lat: Latitude of the location.
+        lon: Longitude of the location.
+        height: Total widget height in pixels.
+        image_id: Pre-fetched Mapillary image ID (used only for the fallback deep link).
+        thumb_url: Direct CDN JPEG URL from get_mapillary_thumb_url().
+    """
+    map_h   = height - 48
+    mly_url = f"https://www.mapillary.com/app/?lat={lat:.6f}&lng={lon:.6f}&z=17"
+    if image_id:
+        mly_url = f"https://www.mapillary.com/app/?image_key={image_id}"
+    gmap    = f"https://maps.google.com/?q={lat:.6f},{lon:.6f}"
+
+    if thumb_url:
+        sv_content = f"""<div id="mly-pane" style="width:100%;height:{map_h}px;display:none;position:relative;background:#111">
+  <img src="{thumb_url}" alt="Street view"
+       style="width:100%;height:100%;object-fit:cover;display:block">
+  <a href="{mly_url}" target="_blank"
+     style="position:absolute;bottom:4px;right:6px;font-size:10px;color:#fff;
+            background:rgba(0,0,0,.55);padding:2px 6px;border-radius:3px;text-decoration:none">
+    Open in Mapillary ↗
+  </a>
+</div>"""
+    else:
+        sv_content = f"""<div id="mly-pane" style="width:100%;height:{map_h}px;display:none;
+     background:#111;display:none;align-items:center;justify-content:center;font-size:12px;color:#888">
+  No nearby street imagery found.&nbsp;
+  <a href="{mly_url}" target="_blank" style="color:#4fa3e0">Browse Mapillary ↗</a>
+</div>"""
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9/dist/leaflet.css">
+<style>
+  *{{margin:0;padding:0;box-sizing:border-box}}
+  body{{background:#111;overflow:hidden;font-family:sans-serif;color:#ccc}}
+  .tabs{{display:flex;height:28px;background:#1e1e1e;border-bottom:1px solid #333}}
+  .tab{{flex:1;text-align:center;line-height:28px;font-size:12px;cursor:pointer;color:#888}}
+  .tab.active{{color:#4fa3e0;border-bottom:2px solid #4fa3e0}}
+  #map-pane{{width:100%;height:{map_h}px;display:none}}
+  .bar{{height:20px;line-height:20px;padding:0 8px;font-size:10px;color:#555;background:#111}}
+  .bar a{{color:#4fa3e0;text-decoration:none;margin-right:12px}}
+</style></head><body>
+<div class="tabs">
+  <div class="tab active" id="tab-sat" onclick="showTab('sat')">🛰 Satellite</div>
+  <div class="tab" id="tab-sv" onclick="showTab('sv')">📸 Street View</div>
+</div>
+<div id="map-pane"><div id="map" style="width:100%;height:{map_h}px"></div></div>
+{sv_content}
+<div class="bar">
+  <a href="{mly_url}" target="_blank">Mapillary ↗</a>
+  <a href="{gmap}" target="_blank">Google Maps ↗</a>
+</div>
+<script src="https://unpkg.com/leaflet@1.9/dist/leaflet.js"></script>
+<script>
+var LAT = {lat}, LON = {lon};
+var leafMap = null;
+
+function showTab(t) {{
+  document.getElementById('tab-sat').className = 'tab' + (t==='sat' ? ' active' : '');
+  document.getElementById('tab-sv').className  = 'tab' + (t==='sv'  ? ' active' : '');
+  document.getElementById('map-pane').style.display   = t==='sat' ? 'block' : 'none';
+  document.getElementById('mly-pane').style.display   = t==='sv'  ? 'flex'  : 'none';
+  if (t === 'sat' && leafMap) {{ leafMap.invalidateSize(); }}
+}}
+
+// Init Leaflet while map-pane is visible (real dimensions)
+document.getElementById('map-pane').style.display = 'block';
+leafMap = L.map('map', {{zoomControl:true, attributionControl:false}}).setView([LAT, LON], 18);
+L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}',
+  {{maxZoom:20}}
+).addTo(leafMap);
+var dot = L.divIcon({{
+  html:'<div style="width:14px;height:14px;background:#e74c3c;border:2px solid #fff;border-radius:50%;box-shadow:0 0 6px rgba(0,0,0,.7)"></div>',
+  className:'', iconSize:[14,14], iconAnchor:[7,7]
+}});
+L.marker([LAT, LON], {{icon:dot}}).addTo(leafMap);
+</script></body></html>"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 7 · Route Assistant — LLM-powered natural language routing (M4)
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_agent:
+    st.markdown("### 💬 Route Assistant")
+    st.caption(
+        "Describe where you need to go in plain English — the assistant plans your "
+        "SkyRoute itinerary. When you confirm booking, it looks up helipad coordination "
+        "details and arranges your ground legs via Uber / Waymo."
+    )
+
+    # ── Helipad pool + FAA ADIP data ──────────────────────────────────────────
+    _agent_helipads: list[dict] = []
+    _agent_faa = faa_raw.dropna(subset=["lat", "lon"])
+    for _, _ar in _agent_faa.iterrows():
+        _agent_helipads.append({
+            "lat":   float(_ar["lat"]),
+            "lon":   float(_ar["lon"]),
+            "name":  str(_ar.get("NAME", "") or "").strip() or None,
+            "ident": str(_ar.get("IDENT", "") or "").strip() or None,
+        })
+    # Pass the full enriched DataFrame for ADIP lookups during booking
+    _adip_df = faa_raw  # faa_raw auto-selects enriched CSV when present
+
+    if not os.getenv("GROQ_API_KEY"):
+        st.warning(
+            "GROQ_API_KEY not set — responses will use template text. "
+            "Add it to `.env` and restart.",
+            icon="⚠️",
+        )
+
+    # ── Session state ─────────────────────────────────────────────────────────
+    if "agent_messages" not in st.session_state:
+        st.session_state["agent_messages"] = []
+    # _agent_last_route: persists the most recently computed route for booking
+    # and for auto-triggering the routing simulator in the EDA tab
+
+    # Render existing conversation
+    for _msg in st.session_state["agent_messages"]:
+        with st.chat_message(_msg["role"]):
+            st.markdown(_msg["content"])
+            if _msg.get("route_map_html"):
+                components.html(_msg["route_map_html"], height=340)
+
+    # ── Example prompts (first load only) ─────────────────────────────────────
+    _pending = st.session_state.pop("_agent_pending_input", None)
+    if not st.session_state["agent_messages"] and not _pending:
+        st.markdown("**Try one of these:**")
+        _ex_cols = st.columns(3)
+        _examples = [
+            "I need to be at New Jersey Financial Center by 14:00",
+            "Get me from JFK to downtown Manhattan before 09:30",
+            "Fastest way from Bronxville to Midtown for a 16:00 meeting",
+        ]
+        for _ei, (_ec, _ex) in enumerate(zip(_ex_cols, _examples)):
+            if _ec.button(_ex, key=f"ex_{_ei}"):
+                st.session_state["_agent_pending_input"] = _ex
+                st.rerun()
+
+    # ── Chat input ────────────────────────────────────────────────────────────
+    _user_input = st.chat_input("Where do you need to be, and when? (or 'yes' to book)") or _pending
+    if _user_input:
+        st.session_state["agent_messages"].append({"role": "user", "content": _user_input})
+        with st.chat_message("user"):
+            st.markdown(_user_input)
+
+        _last_route = st.session_state.get("_agent_last_route")
+        _booking_mode = is_booking_intent(_user_input) and _last_route is not None
+        _book_legs_to_render: list = []
+
+        with st.chat_message("assistant"):
+            # ── BOOKING FLOW ──────────────────────────────────────────────
+            if _booking_mode:
+                with st.spinner("Looking up helipad contacts and arranging ground transport…"):
+                    _book_legs_to_render = run_booking(
+                        _last_route["route"], faa_adip_df=_adip_df
+                    )
+
+                st.success("**Booking confirmed (simulated)** — step-by-step details below:")
+                _reply = "Booking confirmed (simulated). Step-by-step details shown below."
+
+            # ── ROUTE PLANNING FLOW ────────────────────────────────────────
+            else:
+                with st.spinner("Computing your SkyRoute itinerary…"):
+                    _result = run_agent(_user_input, helipads=_agent_helipads)
+
+                if _result["error"]:
+                    _reply = f"Sorry — {_result['error']}"
+                    st.warning(_reply)
+                else:
+                    _route = _result["route"]
+                    _reply = _result["response"] or ""
+
+                    # Store for booking and simulator sync
+                    st.session_state["_agent_last_route"] = _result
+
+                    st.markdown(_reply)
+                    st.divider()
+
+                    # Metrics
+                    _rc1, _rc2, _rc3, _rc4 = st.columns(4)
+                    _rc1.metric("Total time",  f"{_route['total_min']} min")
+                    _rc2.metric("Drive only",  f"{_route['drive_only_min']} min")
+                    _rc3.metric("Time saved",  f"{_route['time_saved_min']} min",
+                                delta=f"−{_route['time_saved_min']} min")
+                    if _route.get("departure_time"):
+                        _rc4.metric("Depart by", _route["departure_time"])
+
+                    # Leg table
+                    if _route["legs"]:
+                        _leg_rows = []
+                        for _lg in _route["legs"]:
+                            _icon = {"helicopter": "🚁", "drive": "🚗", "walk": "🚶"}.get(_lg["mode"], "•")
+                            _leg_rows.append({
+                                "Mode": f"{_icon}  {_lg['mode'].title()}",
+                                "From": _lg["from"],
+                                "To":   _lg["to"],
+                                "km":   _lg["dist_km"],
+                                "min":  _lg["duration_min"],
+                            })
+                        st.dataframe(_leg_rows, use_container_width=True, hide_index=True)
+
+                    # Route map
+                    _orig = _result.get("origin", {})
+                    _dest = _result.get("destination", {})
+                    _pad_a = _route.get("nearest_pad_origin")
+                    _pad_b = _route.get("nearest_pad_dest")
+                    if _orig.get("lat") and _dest.get("lat"):
+                        _all_lats = [_orig["lat"], _dest["lat"]]
+                        _all_lons = [_orig["lon"], _dest["lon"]]
+                        if _pad_a: _all_lats.append(_pad_a["lat"]); _all_lons.append(_pad_a["lon"])
+                        if _pad_b: _all_lats.append(_pad_b["lat"]); _all_lons.append(_pad_b["lon"])
+                        _rm = folium.Map(
+                            location=[(min(_all_lats)+max(_all_lats))/2,
+                                      (min(_all_lons)+max(_all_lons))/2],
+                            zoom_start=11, tiles="CartoDB positron",
+                        )
+                        folium.Marker(
+                            [_orig["lat"], _orig["lon"]], tooltip=f"Origin: {_orig.get('text','A')}",
+                            icon=folium.Icon(color="blue", icon="home", prefix="fa"),
+                        ).add_to(_rm)
+                        folium.Marker(
+                            [_dest["lat"], _dest["lon"]], tooltip=f"Destination: {_dest.get('text','B')}",
+                            icon=folium.Icon(color="red", icon="flag", prefix="fa"),
+                        ).add_to(_rm)
+                        if _pad_a:
+                            folium.Marker([_pad_a["lat"], _pad_a["lon"]],
+                                tooltip=f"Takeoff: {_pad_a.get('name') or _pad_a.get('ident','Helipad')}",
+                                icon=folium.Icon(color="cadetblue", icon="plane", prefix="fa"),
+                            ).add_to(_rm)
+                            folium.PolyLine([[_orig["lat"],_orig["lon"]],[_pad_a["lat"],_pad_a["lon"]]],
+                                color="#22c55e", weight=3, tooltip="Ground to helipad").add_to(_rm)
+                        if _pad_b:
+                            folium.Marker([_pad_b["lat"], _pad_b["lon"]],
+                                tooltip=f"Landing: {_pad_b.get('name') or _pad_b.get('ident','Helipad')}",
+                                icon=folium.Icon(color="green", icon="plane", prefix="fa"),
+                            ).add_to(_rm)
+                            folium.PolyLine([[_pad_b["lat"],_pad_b["lon"]],[_dest["lat"],_dest["lon"]]],
+                                color="#22c55e", weight=3, tooltip="Ground from helipad").add_to(_rm)
+                        if _pad_a and _pad_b:
+                            folium.PolyLine(
+                                [[_pad_a["lat"],_pad_a["lon"]],[_pad_b["lat"],_pad_b["lon"]]],
+                                color="#00d4ff", weight=3, dash_array="10 6",
+                                tooltip="Helicopter flight",
+                            ).add_to(_rm)
+                        _rm.fit_bounds([[min(_all_lats)-0.02, min(_all_lons)-0.02],
+                                        [max(_all_lats)+0.02, max(_all_lons)+0.02]])
+                        st_folium(_rm, height=340, width=None, returned_objects=[])
+
+                    st.info(
+                        "Type **yes** or **book it** to confirm and see helipad coordination "
+                        "details + arrange your ground transport. "
+                        "The route has also been sent to the **EDA & HIE → Routing Simulator** tab.",
+                        icon="ℹ️",
+                    )
+
+                    with st.expander("Resolved locations & extracted params", expanded=False):
+                        _lc1, _lc2 = st.columns(2)
+                        _lc1.markdown(
+                            f"**Origin:** {_orig.get('text','—')}  \n"
+                            f"`{_orig.get('lat',0):.5f}, {_orig.get('lon',0):.5f}`"
+                        )
+                        _lc2.markdown(
+                            f"**Destination:** {_dest.get('text','—')}  \n"
+                            f"`{_dest.get('lat',0):.5f}, {_dest.get('lon',0):.5f}`"
+                        )
+                        if _result.get("params"):
+                            st.json(_result["params"])
+
+        # ── Booking leg cards (outside st.chat_message so iframes render at full width) ──
+        for _bl in _book_legs_to_render:
+            if _bl["mode"] == "rideshare":
+                rs = _bl["rideshare"]
+                st.markdown(
+                    f"### 🚗 Leg {_bl['leg_index']+1} — Ground Transport"
+                    f"  \n**{_bl['from']} → {_bl['to']}**"
+                )
+                _gc1, _gc2, _gc3 = st.columns(3)
+                _gc1.metric("Estimated fare", rs["fare_range"])
+                _gc2.metric("Duration", f"{rs['duration_min']} min")
+                _gc3.metric("Distance", f"{rs['dist_km']} km")
+                st.markdown(
+                    f"**Booking ref:** `{rs['booking_ref']}`  \n"
+                    f"**Services:** {', '.join(rs['vehicles'])}  \n"
+                    f"[📱 Open Uber]({rs['uber_deeplink']}) &nbsp;·&nbsp; "
+                    f"[🚗 Waymo One]({rs['waymo_url']})"
+                )
+                st.caption("_Simulated — actual pricing and availability depend on demand._")
+                with st.expander(f"📍 Pickup — {_bl['from']}", expanded=True):
+                    components.html(
+                        _mly_viewer_html(_bl["pickup_lat"], _bl["pickup_lon"],
+                                         image_id=_bl.get("pickup_mly_id", ""),
+                                         thumb_url=_bl.get("pickup_mly_thumb", "")),
+                        height=260,
+                    )
+                with st.expander(f"📍 Dropoff — {_bl['to']}", expanded=True):
+                    components.html(
+                        _mly_viewer_html(_bl["dropoff_lat"], _bl["dropoff_lon"],
+                                         image_id=_bl.get("dropoff_mly_id", ""),
+                                         thumb_url=_bl.get("dropoff_mly_thumb", "")),
+                        height=260,
+                    )
+
+            elif _bl["mode"] == "walk":
+                st.markdown(
+                    f"### 🚶 Leg {_bl['leg_index']+1} — Walk"
+                    f"  \n**{_bl['from']} → {_bl['to']}**"
+                )
+                _wc1, _wc2 = st.columns(2)
+                _wc1.metric("Distance", f"{_bl['dist_km']} km")
+                _wc2.metric("Walk time", f"{_bl['duration_min']} min")
+                st.info(
+                    f"Only {_bl['dist_km']} km — no transport needed. "
+                    f"Approximately {_bl['duration_min']} min on foot.",
+                    icon="🚶",
+                )
+                with st.expander("📍 Street view at start", expanded=True):
+                    components.html(
+                        _mly_viewer_html(_bl["pickup_lat"], _bl["pickup_lon"],
+                                         height=240,
+                                         image_id=_bl.get("pickup_mly_id", ""),
+                                         thumb_url=_bl.get("pickup_mly_thumb", "")),
+                        height=240,
+                    )
+
+            elif _bl["mode"] == "helicopter":
+                dep = _bl["departure_helipad"]
+                arr = _bl["arrival_helipad"]
+                st.markdown(
+                    f"### 🚁 Leg {_bl['leg_index']+1} — Helicopter Flight"
+                    f"  \n**{dep['name']} → {arr['name']}**  "
+                    f"({_bl['dist_km']} km · {_bl['duration_min']} min)"
+                )
+                with st.expander(f"📋 Departure: {dep['name']} ({dep['ident'] or 'OSM'})", expanded=True):
+                    _hc1, _hc2 = st.columns(2)
+                    _hc1.markdown(
+                        f"**Status:** {dep.get('status','—')}  \n"
+                        f"**City:** {dep.get('servcity','—')}  \n"
+                        f"**Ownership:** {dep.get('ownership','—')}  \n"
+                        f"**Private use:** {'Yes' if dep.get('private_use') else 'No'}  \n"
+                        f"**Coordinates:** `{dep['lat']:.5f}, {dep['lon']:.5f}`"
+                    )
+                    _hc2.markdown(f"**Coordination note:**  \n{dep.get('contact_notes','—')}")
+                    if dep.get("adip_url"):
+                        st.markdown(f"[📋 Open ADIP record]({dep['adip_url']})")
+                    st.markdown(f"[📍 Google Maps ↗]({dep.get('gmaps_url','')})")
+                    components.html(
+                        _mly_viewer_html(dep["lat"], dep["lon"],
+                                         image_id=dep.get("mly_image_id", ""),
+                                         thumb_url=dep.get("mly_thumb_url", "")),
+                        height=260,
+                    )
+                with st.expander(f"📋 Arrival: {arr['name']} ({arr['ident'] or 'OSM'})", expanded=True):
+                    _ac1, _ac2 = st.columns(2)
+                    _ac1.markdown(
+                        f"**Status:** {arr.get('status','—')}  \n"
+                        f"**City:** {arr.get('servcity','—')}  \n"
+                        f"**Ownership:** {arr.get('ownership','—')}  \n"
+                        f"**Private use:** {'Yes' if arr.get('private_use') else 'No'}  \n"
+                        f"**Coordinates:** `{arr['lat']:.5f}, {arr['lon']:.5f}`"
+                    )
+                    _ac2.markdown(f"**Coordination note:**  \n{arr.get('contact_notes','—')}")
+                    if arr.get("adip_url"):
+                        st.markdown(f"[📋 Open ADIP record]({arr['adip_url']})")
+                    st.markdown(f"[📍 Google Maps ↗]({arr.get('gmaps_url','')})")
+                    components.html(
+                        _mly_viewer_html(arr["lat"], arr["lon"],
+                                         image_id=arr.get("mly_image_id", ""),
+                                         thumb_url=arr.get("mly_thumb_url", "")),
+                        height=260,
+                    )
+
+        st.session_state["agent_messages"].append({"role": "assistant", "content": _reply})
+
+    # ── Clear conversation ─────────────────────────────────────────────────────
+    if st.session_state["agent_messages"]:
+        if st.button("Clear conversation", key="agent_clear"):
+            st.session_state["agent_messages"] = []
+            st.session_state.pop("_agent_last_route", None)
+            st.rerun()
