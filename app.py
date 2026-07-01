@@ -3395,7 +3395,7 @@ def _load_inspector_model():
     """Load the fine-tuned YOLO model once per session."""
     try:
         return load_yolo_model(YOLO_MODEL_PATH)
-    except FileNotFoundError:
+    except Exception:
         return None
 
 
