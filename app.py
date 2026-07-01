@@ -3408,9 +3408,17 @@ def _get_test_results(model_path_str: str) -> pd.DataFrame:
         if len(cached) == 747 and "category" in cached.columns:
             return cached
 
+    _EMPTY_COLS = ["ident", "name", "lat", "lon", "gt", "pred",
+                   "detected", "confidence", "bbox_px", "category"]
+    if not _TEST_IMG_DIR.exists():
+        return pd.DataFrame(columns=_EMPTY_COLS)
+
     model = load_yolo_model(Path(model_path_str))
-    faa   = pd.read_csv(DATA_DIR / "faa_adip_enriched.csv")
-    faa_map = {str(r.IDENT): r for _, r in faa.iterrows()}
+    try:
+        faa     = pd.read_csv(DATA_DIR / "faa_adip_enriched.csv")
+        faa_map = {str(r.IDENT): r for _, r in faa.iterrows()}
+    except FileNotFoundError:
+        faa_map = {}
 
     rows = []
     for chip_path in sorted(_TEST_IMG_DIR.glob("*.jpg")):
@@ -3509,6 +3517,12 @@ def _inspector_content() -> None:
         )
 
         test_results = _get_test_results(str(YOLO_MODEL_PATH))
+        if test_results.empty:
+            st.info(
+                "Test set imagery is not available in this deployment. "
+                "Run `scripts/build_yolo_dataset.py` locally to generate NAIP chips, "
+                "then re-deploy with the generated `data/inspector_results.csv`."
+            )
         cat_counts   = test_results.category.value_counts().to_dict()
 
         ctrl_a, view_a = st.columns([1, 2], gap="medium")
