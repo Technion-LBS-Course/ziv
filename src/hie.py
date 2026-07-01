@@ -638,6 +638,43 @@ def bbox_px_to_latlon(
     return lat, lon
 
 
+def bbox_px_to_bounds(
+    bbox_px: list[int],
+    chip_lat: float,
+    chip_lon: float,
+    window_m: float = NAIP_WINDOW_M,
+    img_px: int = IMG_PX,
+) -> list[list[float]]:
+    """Convert a pixel-space bbox to geographic bounds for Folium Rectangle.
+
+    Args:
+        bbox_px: [x1, y1, x2, y2] in pixel coordinates.
+        chip_lat: Latitude of the chip centre.
+        chip_lon: Longitude of the chip centre.
+        window_m: Side length of the chip in metres (default 100 m).
+        img_px: Chip side length in pixels (default 640).
+
+    Returns:
+        [[south, west], [north, east]] geographic bounds.
+    """
+    gsd = window_m / img_px
+    m_per_deg_lat = 111_320
+    m_per_deg_lon = 111_320 * math.cos(math.radians(chip_lat))
+
+    def _corner(px_x: float, px_y: float) -> tuple[float, float]:
+        dx_m = (px_x - img_px / 2) * gsd
+        dy_m = (img_px / 2 - px_y) * gsd
+        return chip_lat + dy_m / m_per_deg_lat, chip_lon + dx_m / m_per_deg_lon
+
+    lat_nw, lon_nw = _corner(bbox_px[0], bbox_px[1])
+    lat_se, lon_se = _corner(bbox_px[2], bbox_px[3])
+
+    return [
+        [min(lat_nw, lat_se), min(lon_nw, lon_se)],
+        [max(lat_nw, lat_se), max(lon_nw, lon_se)],
+    ]
+
+
 def compute_offset_m(
     ref_lat: float,
     ref_lon: float,
