@@ -348,11 +348,12 @@ app.py (Streamlit)
 | Mapbox traffic basemap | ✅ Done | `traffic-day-v2` style as switchable basemap in routing simulator + Folium map (replaces deprecated v4 raster overlay) |
 | Validated OSM routing pool | ✅ Done | Inspector Mode C; `validatedLayer` in routing simulator |
 | `run.ps1` / `run.bat` launcher | ✅ Done | Load `.env`, report key status; safe to commit |
-| **`src/agent.py` — LLM Route Assistant** | ✅ Done | Natural language routing via Groq/Llama-3.3-70b; intent detection (route, book, info); TomTom + Nominatim geocoding |
+| **`src/agent.py` — LLM Route Assistant** | ✅ Done | Natural language routing via Groq/Llama; intent detection (route, book, off_topic); TomTom + Nominatim geocoding; off-topic guard with negative few-shot examples |
 | **Booking flow** | ✅ Done | Per-leg booking: helicopter (ADIP lookup), rideshare (Uber/Waymo deeplinks), walk mode for legs < 0.5 km |
 | **ADIP remarks decoding** | ✅ Done | Cryptic FAA remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) decoded to plain English via LLM |
 | **Mapillary street-level imagery** | ✅ Done | Server-side image ID lookup + thumbnail fetch; displayed as `<img>` tag — no JS viewer library, no CORS issues |
 | **Geocoding pipeline** | ✅ Done | TomTom Fuzzy Search → LLM address extraction → Nominatim; handles business names and floor-level addresses |
+| **TFR pre-booking check** | ✅ Done | `_check_tfrs_on_segment()` in `src/agent.py` — samples 7 points along aerial segment; hard blocks (SECURITY/STADIUM/NDA_TFR) prevent booking; soft warnings shown as `st.warning()` banners before route narrative |
 
 ### M4 Remaining Items
 

@@ -2223,19 +2223,30 @@ with tab_eda:
 }})();
 </script>"""))
 
-        # Poll every 400 ms and call invalidateSize() whenever the Leaflet
-        # container has zero dimensions (hidden tab on first render).
-        # Stops automatically after 20 s so it does not run forever.
+        # Poll every 400 ms: call invalidateSize() while container is 0×0
+        # (hidden-tab init), then re-add the zoom control once the map has
+        # proper dimensions so the +/- buttons are never clipped at the edge.
         from branca.element import Element
         m.get_root().html.add_child(Element("""
+<style>
+.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}
+.leaflet-control-zoom{margin:0!important;}
+</style>
 <script>
 (function(){
-    var _n=0;
+    var _f=false,_n=0;
     var _iv=setInterval(function(){
         _n++;
         if(typeof window.map!=='undefined'){
             var s=window.map.getSize();
             if(s.x===0||s.y===0){window.map.invalidateSize(true);}
+            else if(!_f){
+                _f=true;
+                if(window.map.zoomControl){
+                    window.map.zoomControl.remove();
+                    window.map.zoomControl.addTo(window.map);
+                }
+            }
         }
         if(_n>50){clearInterval(_iv);}
     },400);
@@ -2775,19 +2786,8 @@ with tab_eda:
 
     from branca.element import Element as _El
     dm.get_root().html.add_child(_El("""
-<script>
-(function(){
-    var _n=0;
-    var _iv=setInterval(function(){
-        _n++;
-        if(typeof window.map!=='undefined'){
-            var s=window.map.getSize();
-            if(s.x===0||s.y===0){window.map.invalidateSize(true);}
-        }
-        if(_n>50){clearInterval(_iv);}
-    },400);
-})();
-</script>"""))
+<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style>
+<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
 
     # ── render density map + KPI panel ───────────────────────────────────
     col_map, col_kpi = st.columns([3, 1])
@@ -2937,9 +2937,8 @@ with tab_eda:
         fg.add_to(sm)
     folium.LayerControl(collapsed=False).add_to(sm)
     sm.get_root().html.add_child(_El("""
-<script>
-(function(){var _n=0,_iv=setInterval(function(){_n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(_n>50)clearInterval(_iv);},400);})();
-</script>"""))
+<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style>
+<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
     st_folium(sm, width=None, height=480, returned_objects=[], key="hotspot_map")
 
     hs_df = pd.DataFrame(hs_rows).set_index("Business Centre")
@@ -3079,9 +3078,8 @@ with tab_eda:
         fg.add_to(rm)
     folium.LayerControl(collapsed=False).add_to(rm)
     rm.get_root().html.add_child(_El("""
-<script>
-(function(){var _n=0,_iv=setInterval(function(){_n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(_n>50)clearInterval(_iv);},400);})();
-</script>"""))
+<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style>
+<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
     st_folium(rm, width=None, height=460, returned_objects=[], key="res_spider_map")
 
     res_df = pd.DataFrame(res_rows).set_index("Residence")
@@ -3604,9 +3602,7 @@ def _inspector_content() -> None:
                         tooltip=f"YOLO bbox  conf={res_a_now['confidence']:.2f}",
                     ).add_to(m_a)
                 folium.LayerControl(collapsed=False).add_to(m_a)
-                m_a.get_root().html.add_child(_BE("""<script>(function(){var n=0,iv=setInterval(function(){
-n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();
-if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);},400);})();</script>"""))
+                m_a.get_root().html.add_child(_BE("""<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style><script>(function(){var _f=false,n=0,iv=setInterval(function(){n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(n>50)clearInterval(iv);},400);})();</script>"""))
                 st_folium(m_a, key=f"insp_a_map_{ver_a}", width=None, height=310,
                           returned_objects=[])
 
@@ -3724,9 +3720,7 @@ if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);}
                     tooltip=f"YOLO ESRI  conf={res_b_esri['confidence']:.2f}",
                 ).add_to(m_b)
             folium.LayerControl(collapsed=False).add_to(m_b)
-            m_b.get_root().html.add_child(_BE("""<script>(function(){var n=0,iv=setInterval(function(){
-n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();
-if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);},400);})();</script>"""))
+            m_b.get_root().html.add_child(_BE("""<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style><script>(function(){var _f=false,n=0,iv=setInterval(function(){n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(n>50)clearInterval(iv);},400);})();</script>"""))
 
             map_out_b = st_folium(m_b, key=f"insp_b_map_{ver_b}", width=None, height=390,
                                   returned_objects=["last_object_clicked"])
@@ -4000,12 +3994,7 @@ if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);}
                         ).add_to(m_c)
 
                     folium.LayerControl(collapsed=True).add_to(m_c)
-                    m_c.get_root().html.add_child(_BE(
-                        """<script>(function(){var n=0,iv=setInterval(function(){
-n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();
-if(s.x===0||s.y===0)window.map.invalidateSize(true);}if(n>50)clearInterval(iv);},400);})();
-</script>"""
-                    ))
+                    m_c.get_root().html.add_child(_BE("""<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style><script>(function(){var _f=false,n=0,iv=setInterval(function(){n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(n>50)clearInterval(iv);},400);})();</script>"""))
 
                     map_out_c = st_folium(
                         m_c, key=f"insp_c_map_{ver_c}",
@@ -4516,6 +4505,13 @@ with tab_agent:
     # ── Session state ─────────────────────────────────────────────────────────
     if "agent_messages" not in st.session_state:
         st.session_state["agent_messages"] = []
+    # _agent_llm_history: [{role, content}] passed to extract_nav_params for multi-turn context.
+    # assistant turns contain the extracted params JSON (not the formatted narrative) so the LLM
+    # can resolve references like "arrive earlier", "same destination", "change origin to...".
+    if "_agent_llm_history" not in st.session_state:
+        st.session_state["_agent_llm_history"] = []
+    if "_agent_booking_legs" not in st.session_state:
+        st.session_state["_agent_booking_legs"] = []
     # _agent_last_route: persists the most recently computed route for booking
     # and for auto-triggering the routing simulator in the EDA tab
 
@@ -4525,6 +4521,109 @@ with tab_agent:
             st.markdown(_msg["content"])
             if _msg.get("route_map_html"):
                 components.html(_msg["route_map_html"], height=340)
+
+    # ── Booking leg cards — rendered from session state so they survive reruns ──
+    for _bl in st.session_state["_agent_booking_legs"]:
+        if _bl["mode"] == "rideshare":
+            rs = _bl["rideshare"]
+            st.markdown(
+                f"### 🚗 Leg {_bl['leg_index']+1} — Ground Transport"
+                f"  \n**{_bl['from']} → {_bl['to']}**"
+            )
+            _gc1, _gc2, _gc3 = st.columns(3)
+            _gc1.metric("Estimated fare", rs["fare_range"])
+            _gc2.metric("Duration", f"{rs['duration_min']} min")
+            _gc3.metric("Distance", f"{rs['dist_km']} km")
+            st.markdown(
+                f"**Booking ref:** `{rs['booking_ref']}`  \n"
+                f"**Services:** {', '.join(rs['vehicles'])}  \n"
+                f"[📱 Open Uber]({rs['uber_deeplink']}) &nbsp;·&nbsp; "
+                f"[🚗 Waymo One]({rs['waymo_url']})"
+            )
+            st.caption("_Simulated — actual pricing and availability depend on demand._")
+            with st.expander(f"📍 Pickup — {_bl['from']}", expanded=True):
+                components.html(
+                    _mly_viewer_html(_bl["pickup_lat"], _bl["pickup_lon"],
+                                     image_id=_bl.get("pickup_mly_id", ""),
+                                     thumb_url=_bl.get("pickup_mly_thumb", "")),
+                    height=260,
+                )
+            with st.expander(f"📍 Dropoff — {_bl['to']}", expanded=True):
+                components.html(
+                    _mly_viewer_html(_bl["dropoff_lat"], _bl["dropoff_lon"],
+                                     image_id=_bl.get("dropoff_mly_id", ""),
+                                     thumb_url=_bl.get("dropoff_mly_thumb", "")),
+                    height=260,
+                )
+
+        elif _bl["mode"] == "walk":
+            st.markdown(
+                f"### 🚶 Leg {_bl['leg_index']+1} — Walk"
+                f"  \n**{_bl['from']} → {_bl['to']}**"
+            )
+            _wc1, _wc2 = st.columns(2)
+            _wc1.metric("Distance", f"{_bl['dist_km']} km")
+            _wc2.metric("Walk time", f"{_bl['duration_min']} min")
+            st.info(
+                f"Only {_bl['dist_km']} km — no transport needed. "
+                f"Approximately {_bl['duration_min']} min on foot.",
+                icon="🚶",
+            )
+            with st.expander("📍 Street view at start", expanded=True):
+                components.html(
+                    _mly_viewer_html(_bl["pickup_lat"], _bl["pickup_lon"],
+                                     height=240,
+                                     image_id=_bl.get("pickup_mly_id", ""),
+                                     thumb_url=_bl.get("pickup_mly_thumb", "")),
+                    height=240,
+                )
+
+        elif _bl["mode"] == "helicopter":
+            dep = _bl["departure_helipad"]
+            arr = _bl["arrival_helipad"]
+            st.markdown(
+                f"### 🚁 Leg {_bl['leg_index']+1} — Helicopter Flight"
+                f"  \n**{dep['name']} → {arr['name']}**  "
+                f"({_bl['dist_km']} km · {_bl['duration_min']} min)"
+            )
+            with st.expander(f"📋 Departure: {dep['name']} ({dep['ident'] or 'OSM'})", expanded=True):
+                _hc1, _hc2 = st.columns(2)
+                _hc1.markdown(
+                    f"**Status:** {dep.get('status','—')}  \n"
+                    f"**City:** {dep.get('servcity','—')}  \n"
+                    f"**Ownership:** {dep.get('ownership','—')}  \n"
+                    f"**Private use:** {'Yes' if dep.get('private_use') else 'No'}  \n"
+                    f"**Coordinates:** `{dep['lat']:.5f}, {dep['lon']:.5f}`"
+                )
+                _hc2.markdown(f"**Coordination note:**  \n{dep.get('contact_notes','—')}")
+                if dep.get("adip_url"):
+                    st.markdown(f"[📋 Open ADIP record]({dep['adip_url']})")
+                st.markdown(f"[📍 Google Maps ↗]({dep.get('gmaps_url','')})")
+                components.html(
+                    _mly_viewer_html(dep["lat"], dep["lon"],
+                                     image_id=dep.get("mly_image_id", ""),
+                                     thumb_url=dep.get("mly_thumb_url", "")),
+                    height=260,
+                )
+            with st.expander(f"📋 Arrival: {arr['name']} ({arr['ident'] or 'OSM'})", expanded=True):
+                _ac1, _ac2 = st.columns(2)
+                _ac1.markdown(
+                    f"**Status:** {arr.get('status','—')}  \n"
+                    f"**City:** {arr.get('servcity','—')}  \n"
+                    f"**Ownership:** {arr.get('ownership','—')}  \n"
+                    f"**Private use:** {'Yes' if arr.get('private_use') else 'No'}  \n"
+                    f"**Coordinates:** `{arr['lat']:.5f}, {arr['lon']:.5f}`"
+                )
+                _ac2.markdown(f"**Coordination note:**  \n{arr.get('contact_notes','—')}")
+                if arr.get("adip_url"):
+                    st.markdown(f"[📋 Open ADIP record]({arr['adip_url']})")
+                st.markdown(f"[📍 Google Maps ↗]({arr.get('gmaps_url','')})")
+                components.html(
+                    _mly_viewer_html(arr["lat"], arr["lon"],
+                                     image_id=arr.get("mly_image_id", ""),
+                                     thumb_url=arr.get("mly_thumb_url", "")),
+                    height=260,
+                )
 
     # ── Example prompts (first load only) ─────────────────────────────────────
     _pending = st.session_state.pop("_agent_pending_input", None)
@@ -4542,9 +4641,11 @@ with tab_agent:
                 st.rerun()
 
     # ── Chat input ────────────────────────────────────────────────────────────
-    _user_input = st.chat_input("Where do you need to be, and when? (or 'yes' to book)") or _pending
+    _user_input = st.chat_input("Where do you need to be, and when? (or 'book now' to book)") or _pending
     if _user_input:
         st.session_state["agent_messages"].append({"role": "user", "content": _user_input})
+        # Clear persisted booking leg cards so stale details don't show during new request
+        st.session_state["_agent_booking_legs"] = []
         with st.chat_message("user"):
             st.markdown(_user_input)
 
@@ -4559,6 +4660,8 @@ with tab_agent:
                     _book_legs_to_render = run_booking(
                         _last_route["route"], faa_adip_df=_adip_df
                     )
+                # Persist so leg cards survive the rerun triggered by agent_messages.append
+                st.session_state["_agent_booking_legs"] = _book_legs_to_render
 
                 st.success("**Booking confirmed (simulated)** — step-by-step details below:")
                 _reply = "Booking confirmed (simulated). Step-by-step details shown below."
@@ -4566,7 +4669,11 @@ with tab_agent:
             # ── ROUTE PLANNING FLOW ────────────────────────────────────────
             else:
                 with st.spinner("Computing your SkyRoute itinerary…"):
-                    _result = run_agent(_user_input, helipads=_agent_helipads)
+                    _result = run_agent(
+                        _user_input,
+                        helipads=_agent_helipads,
+                        history=st.session_state["_agent_llm_history"],
+                    )
 
                 if _result["error"]:
                     _reply = f"Sorry — {_result['error']}"
@@ -4577,6 +4684,14 @@ with tab_agent:
 
                     # Store for booking and simulator sync
                     st.session_state["_agent_last_route"] = _result
+                    # Stage params for LLM history — written after _reply is known
+                    st.session_state["_agent_llm_history_pending"] = _result.get("params")
+
+                    # TFR warnings — show before the route narrative
+                    if _result.get("tfrs_ignored"):
+                        st.error("🚫 TFR OVERRIDE ACTIVE — routing through restricted airspace. For planning only; operator approval required before flight.")
+                    for _tfr_txt in _result.get("tfr_warnings", []):
+                        st.warning(f"⚠️ Active TFR on aerial segment: {_tfr_txt}")
 
                     st.markdown(_reply)
                     st.divider()
@@ -4671,114 +4786,30 @@ with tab_agent:
                         if _result.get("params"):
                             st.json(_result["params"])
 
-        # ── Booking leg cards (outside st.chat_message so iframes render at full width) ──
-        for _bl in _book_legs_to_render:
-            if _bl["mode"] == "rideshare":
-                rs = _bl["rideshare"]
-                st.markdown(
-                    f"### 🚗 Leg {_bl['leg_index']+1} — Ground Transport"
-                    f"  \n**{_bl['from']} → {_bl['to']}**"
-                )
-                _gc1, _gc2, _gc3 = st.columns(3)
-                _gc1.metric("Estimated fare", rs["fare_range"])
-                _gc2.metric("Duration", f"{rs['duration_min']} min")
-                _gc3.metric("Distance", f"{rs['dist_km']} km")
-                st.markdown(
-                    f"**Booking ref:** `{rs['booking_ref']}`  \n"
-                    f"**Services:** {', '.join(rs['vehicles'])}  \n"
-                    f"[📱 Open Uber]({rs['uber_deeplink']}) &nbsp;·&nbsp; "
-                    f"[🚗 Waymo One]({rs['waymo_url']})"
-                )
-                st.caption("_Simulated — actual pricing and availability depend on demand._")
-                with st.expander(f"📍 Pickup — {_bl['from']}", expanded=True):
-                    components.html(
-                        _mly_viewer_html(_bl["pickup_lat"], _bl["pickup_lon"],
-                                         image_id=_bl.get("pickup_mly_id", ""),
-                                         thumb_url=_bl.get("pickup_mly_thumb", "")),
-                        height=260,
-                    )
-                with st.expander(f"📍 Dropoff — {_bl['to']}", expanded=True):
-                    components.html(
-                        _mly_viewer_html(_bl["dropoff_lat"], _bl["dropoff_lon"],
-                                         image_id=_bl.get("dropoff_mly_id", ""),
-                                         thumb_url=_bl.get("dropoff_mly_thumb", "")),
-                        height=260,
-                    )
-
-            elif _bl["mode"] == "walk":
-                st.markdown(
-                    f"### 🚶 Leg {_bl['leg_index']+1} — Walk"
-                    f"  \n**{_bl['from']} → {_bl['to']}**"
-                )
-                _wc1, _wc2 = st.columns(2)
-                _wc1.metric("Distance", f"{_bl['dist_km']} km")
-                _wc2.metric("Walk time", f"{_bl['duration_min']} min")
-                st.info(
-                    f"Only {_bl['dist_km']} km — no transport needed. "
-                    f"Approximately {_bl['duration_min']} min on foot.",
-                    icon="🚶",
-                )
-                with st.expander("📍 Street view at start", expanded=True):
-                    components.html(
-                        _mly_viewer_html(_bl["pickup_lat"], _bl["pickup_lon"],
-                                         height=240,
-                                         image_id=_bl.get("pickup_mly_id", ""),
-                                         thumb_url=_bl.get("pickup_mly_thumb", "")),
-                        height=240,
-                    )
-
-            elif _bl["mode"] == "helicopter":
-                dep = _bl["departure_helipad"]
-                arr = _bl["arrival_helipad"]
-                st.markdown(
-                    f"### 🚁 Leg {_bl['leg_index']+1} — Helicopter Flight"
-                    f"  \n**{dep['name']} → {arr['name']}**  "
-                    f"({_bl['dist_km']} km · {_bl['duration_min']} min)"
-                )
-                with st.expander(f"📋 Departure: {dep['name']} ({dep['ident'] or 'OSM'})", expanded=True):
-                    _hc1, _hc2 = st.columns(2)
-                    _hc1.markdown(
-                        f"**Status:** {dep.get('status','—')}  \n"
-                        f"**City:** {dep.get('servcity','—')}  \n"
-                        f"**Ownership:** {dep.get('ownership','—')}  \n"
-                        f"**Private use:** {'Yes' if dep.get('private_use') else 'No'}  \n"
-                        f"**Coordinates:** `{dep['lat']:.5f}, {dep['lon']:.5f}`"
-                    )
-                    _hc2.markdown(f"**Coordination note:**  \n{dep.get('contact_notes','—')}")
-                    if dep.get("adip_url"):
-                        st.markdown(f"[📋 Open ADIP record]({dep['adip_url']})")
-                    st.markdown(f"[📍 Google Maps ↗]({dep.get('gmaps_url','')})")
-                    components.html(
-                        _mly_viewer_html(dep["lat"], dep["lon"],
-                                         image_id=dep.get("mly_image_id", ""),
-                                         thumb_url=dep.get("mly_thumb_url", "")),
-                        height=260,
-                    )
-                with st.expander(f"📋 Arrival: {arr['name']} ({arr['ident'] or 'OSM'})", expanded=True):
-                    _ac1, _ac2 = st.columns(2)
-                    _ac1.markdown(
-                        f"**Status:** {arr.get('status','—')}  \n"
-                        f"**City:** {arr.get('servcity','—')}  \n"
-                        f"**Ownership:** {arr.get('ownership','—')}  \n"
-                        f"**Private use:** {'Yes' if arr.get('private_use') else 'No'}  \n"
-                        f"**Coordinates:** `{arr['lat']:.5f}, {arr['lon']:.5f}`"
-                    )
-                    _ac2.markdown(f"**Coordination note:**  \n{arr.get('contact_notes','—')}")
-                    if arr.get("adip_url"):
-                        st.markdown(f"[📋 Open ADIP record]({arr['adip_url']})")
-                    st.markdown(f"[📍 Google Maps ↗]({arr.get('gmaps_url','')})")
-                    components.html(
-                        _mly_viewer_html(arr["lat"], arr["lon"],
-                                         image_id=arr.get("mly_image_id", ""),
-                                         thumb_url=arr.get("mly_thumb_url", "")),
-                        height=260,
-                    )
-
         st.session_state["agent_messages"].append({"role": "assistant", "content": _reply})
+
+        # Update LLM history — store extracted params JSON as assistant turn so future
+        # requests can reference "same destination", "arrive earlier", etc.
+        if not _booking_mode:
+            _params_for_history = st.session_state.get("_agent_llm_history_pending")
+            if _params_for_history:
+                st.session_state["_agent_llm_history"].append(
+                    {"role": "user", "content": _user_input}
+                )
+                st.session_state["_agent_llm_history"].append(
+                    {"role": "assistant", "content": json.dumps(_params_for_history)}
+                )
+                st.session_state.pop("_agent_llm_history_pending", None)
+
+        # Rerun so elements rendered above (chat history, booking leg cards) reflect
+        # the session state that was just updated inside this block.
+        st.rerun()
 
     # ── Clear conversation ─────────────────────────────────────────────────────
     if st.session_state["agent_messages"]:
         if st.button("Clear conversation", key="agent_clear"):
             st.session_state["agent_messages"] = []
+            st.session_state["_agent_llm_history"] = []
+            st.session_state["_agent_booking_legs"] = []
             st.session_state.pop("_agent_last_route", None)
             st.rerun()

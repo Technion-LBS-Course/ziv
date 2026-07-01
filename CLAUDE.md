@@ -623,10 +623,11 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 | Mapbox traffic basemap | `app.py` | `traffic-day-v2` style as switchable basemap in routing simulator + Folium map; replaces deprecated v4 raster overlay |
 | Routing performance | `app.py` | 3 OSRM calls → 1 (helipad legs replaced by `estimateDriveLeg`); Dijkstra corridor-bounded; `getAllHelipads()` cached; browser yield before sync work |
 | Launcher scripts | `run.ps1`, `run.bat` | Load `.env`, report key status — safe to commit |
-| **LLM Route Assistant** | `src/agent.py` | Groq/Llama-3.3-70b; intent detection (route/book/info); TomTom Fuzzy Search + LLM address extraction + Nominatim geocoding cascade |
+| **LLM Route Assistant** | `src/agent.py` | Groq/Llama; intent detection (route/book/off_topic); TomTom Fuzzy Search + LLM address extraction + Nominatim geocoding cascade; off-topic guard with negative few-shot examples |
 | **Booking flow** | `src/agent.py` | Per-leg: helicopter (ADIP lookup + METAR), rideshare (Uber/Waymo deeplinks), walk (< 0.5 km threshold) |
 | **ADIP remarks decoding** | `src/agent.py` | `_decode_adip_remarks()` via Groq/Llama — cryptic FAA remarks → plain English coordination notes |
 | **Mapillary street-level imagery** | `src/agent.py` + `app.py` | Server-side ID lookup (`find_nearest_mapillary_image`) + thumbnail fetch (`get_mapillary_thumb_url`); rendered as `<img>` — no JS viewer, no CORS |
+| **TFR pre-booking check** | `src/agent.py` | `_check_tfrs_on_segment()` — samples 7 points on aerial leg; hard blocks (SECURITY/STADIUM/NDA_TFR/DEF) abort with error; soft TFRs shown as `st.warning()` banners in app before route narrative |
 
 ### Non-obvious decisions made during M4
 
@@ -657,6 +658,10 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 **Dijkstra corridor bounding:** `findRoute()` builds a graph of all visible helipads. With all layers on (~3000 nodes) and `RANGE_KM=555 km`, the graph is near-complete → O(N²) edge checks. A ±1.5°lat / ±2.5°lon bounding box filter around the route reduces active nodes to ~100–200 for a typical NE US route, cutting Dijkstra work by ~100×. The direct-path TFR check (4 sample points, sync) skips Dijkstra entirely when the straight line is already clear.
 
 **`getAllHelipads()` caching:** The function iterated all Leaflet marker objects via `eachLayer()` on every route click (~3000 markers × 3 layers). A module-level `_helipadCache` array is invalidated on `layeradd`/`layerremove` map events — subsequent route clicks reuse the cached array.
+
+**TFR pre-booking segment check:** `_check_tfrs_on_segment()` in `src/agent.py` calls `fetch_active_tfrs()` (15-min cached) and tests 7 evenly-spaced points along the pad_a → pad_b great-circle arc using a ray-casting point-in-polygon function. Stadium TFRs use a 3 nm (5.556 km) radius check instead of polygon containment since they are stored as points. Type codes in `_HARD_TFR_CODES = {"NDA_TFR", "DEF", "SECURITY", "STADIUM"}` block booking entirely; all other intersecting TFRs are returned as soft warnings rendered via `st.warning()` in the Route Assistant tab. The result dict gains a `tfr_warnings: list[str]` key; hard blocks set `result["error"]` and return early before the narrative formatter is called.
+
+**Groq model configuration:** `llama-3.3-70b-versatile` and `meta-llama/llama-4-scout-17b-16e-instruct` are both project-blocked by default in Groq console. Working model as of June 2026: `llama-3.1-8b-instant` (set as `_GROQ_MODEL` primary). To use 70b: go to console.groq.com/settings/project/limits and enable it, then set `_GROQ_MODEL = "llama-3.3-70b-versatile"`. The LLM exception fallback in `extract_nav_params()` now returns `_FALLBACK_PARAMS` (with `destination_text: None`) on any API error — this triggers the destination guard and returns the routing redirect, rather than the previous bug where `user_text` was used as `destination_text`.
 
 ### Remaining M4 items
 

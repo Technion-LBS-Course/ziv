@@ -121,9 +121,8 @@ def _decode_adip_remarks(remarks: list, ident: str, name: str) -> str:
         log.warning("Remarks decode LLM failed for %s: %s", ident, exc)
         return f"Remarks: {raw}"
 
-# Default model — llama-3.1-8b-instant is fast and available on the free tier.
-# Upgrade to llama-3.3-70b-versatile in Groq project settings for better accuracy.
-_GROQ_MODEL = "llama-3.1-8b-instant"
+_GROQ_MODEL         = "llama-3.1-8b-instant"
+_GROQ_MODEL_FAST    = "meta-llama/llama-4-scout-17b-16e-instruct"  # if enabled in project settings
 
 # ── Groq client (lazy — avoids ImportError if package not installed) ──────────
 
@@ -164,19 +163,42 @@ Required keys:
   "arrival_time": "HH:MM" string (24-hour) or null,
   "departure_time": "HH:MM" string (24-hour) or null,
   "notes": string or null,
-  "intent": "route" | "book" | "cancel"
+  "intent": "route" | "book" | "cancel" | "off_topic",
+  "ignore_tfrs": boolean
 }
 
 intent rules:
 - "route": user wants to find/plan a route (default)
 - "book": user confirms they want to book ("yes", "book it", "confirm", "go ahead", "proceed")
 - "cancel": user wants to cancel or start over
+- "off_topic": user's message is unrelated to air travel, routing, or helipad queries
+  (e.g. weather questions, general knowledge, creative writing, jokes, food, sports)
+  IMPORTANT: when no clear origin/destination place name is present, always use "off_topic".
+  Do NOT invent or infer a destination from unrelated context.
+
+ignore_tfrs rules:
+- Set to true when the user explicitly says they want to bypass, ignore, or override TFR restrictions
+  (e.g. "ignore TFRs", "bypass restrictions", "route anyway", "override TFR", "I have a waiver")
+- Default: false
 
 Rules:
 - If origin is not mentioned, set origin_text to null
 - If time context implies arrival deadline ("meeting at 14:00"), use arrival_time
 - notes: any preference the user mentioned ("prefer helicopter", "avoid Manhattan")
 - Expand abbreviations: "NJ" → "New Jersey", "NYC" → "New York City"
+
+Examples:
+User: "Meeting in Greenwich at 3pm, leaving Penn Station"
+Output: {"origin_text": "Penn Station, New York", "destination_text": "Greenwich, CT", "arrival_time": "15:00", "departure_time": null, "notes": null, "intent": "route", "ignore_tfrs": false}
+
+User: "Route to JFK, ignore TFRs"
+Output: {"origin_text": null, "destination_text": "JFK Airport, New York", "arrival_time": null, "departure_time": null, "notes": null, "intent": "route", "ignore_tfrs": true}
+
+User: "What should I have for breakfast?"
+Output: {"origin_text": null, "destination_text": null, "arrival_time": null, "departure_time": null, "notes": null, "intent": "off_topic", "ignore_tfrs": false}
+
+User: "Who won the World Cup?"
+Output: {"origin_text": null, "destination_text": null, "arrival_time": null, "departure_time": null, "notes": null, "intent": "off_topic", "ignore_tfrs": false}
 """
 
 _FALLBACK_PARAMS: dict = {
@@ -186,6 +208,7 @@ _FALLBACK_PARAMS: dict = {
     "departure_time": None,
     "notes": None,
     "intent": "route",
+    "ignore_tfrs": False,
 }
 
 # Simple booking-intent keywords — faster than an LLM call for clear confirmations
@@ -198,11 +221,15 @@ def is_booking_intent(user_text: str) -> bool:
     return bool(words & _BOOK_KEYWORDS)
 
 
-def extract_nav_params(user_text: str) -> dict:
+def extract_nav_params(user_text: str, history: list[dict] | None = None) -> dict:
     """Extract navigation parameters from free text using Groq/Llama.
 
     Args:
         user_text: Free-form user request in any language/style.
+        history: Prior conversation turns as [{role, content}] pairs.
+            The assistant turns should contain the previously extracted JSON
+            so the LLM can resolve references like "earlier", "same destination".
+            Capped internally to the last 6 messages (3 exchanges).
 
     Returns:
         Dict with keys: origin_text, destination_text, arrival_time,
@@ -210,16 +237,19 @@ def extract_nav_params(user_text: str) -> dict:
     """
     client = _get_groq_client()
     if client is None:
+        # No LLM available — treat the whole message as the destination (graceful degradation)
         return {**_FALLBACK_PARAMS, "destination_text": user_text}
+
+    messages: list[dict] = [{"role": "system", "content": _EXTRACTION_SYSTEM}]
+    if history:
+        messages.extend(history[-6:])  # last 3 exchanges — enough context, bounded cost
+    messages.append({"role": "user", "content": user_text})
 
     try:
         resp = client.chat.completions.create(
             model=_GROQ_MODEL,
             temperature=0,  # deterministic JSON output
-            messages=[
-                {"role": "system", "content": _EXTRACTION_SYSTEM},
-                {"role": "user",   "content": user_text},
-            ],
+            messages=messages,
         )
         raw = resp.choices[0].message.content.strip()
         params = json.loads(raw)
@@ -228,7 +258,8 @@ def extract_nav_params(user_text: str) -> dict:
         return params
     except (json.JSONDecodeError, Exception) as exc:
         log.warning("Groq extraction failed: %s", exc)
-        return {**_FALLBACK_PARAMS, "destination_text": user_text}
+        # LLM call failed — return empty params so the destination guard fires
+        return {**_FALLBACK_PARAMS}
 
 
 # ── Geocoding ─────────────────────────────────────────────────────────────────
@@ -370,6 +401,105 @@ def geocode_place(place_name: str) -> Optional[tuple[float, float]]:
 
     # 3. Nominatim fallback on cleaned address
     return _geocode_nominatim(cleaned)
+
+
+# ── TFR segment check ─────────────────────────────────────────────────────────
+
+def _point_in_polygon(lat: float, lon: float, ring: list[list[float]]) -> bool:
+    """Ray-casting point-in-polygon test.
+
+    Args:
+        lat: Point latitude.
+        lon: Point longitude.
+        ring: Polygon ring as [[lat, lon], ...] (Folium-compatible).
+    """
+    inside = False
+    n = len(ring)
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i][1], ring[i][0]   # lon, lat
+        xj, yj = ring[j][1], ring[j][0]
+        if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / (yj - yi + 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+_HARD_TFR_CODES = {"NDA_TFR", "DEF", "SECURITY", "STADIUM"}
+
+def _check_tfrs_on_segment(
+    lat1: float, lon1: float,
+    lat2: float, lon2: float,
+    n_samples: int = 7,
+) -> tuple[list[dict], list[dict]]:
+    """Check whether the aerial segment intersects any active TFRs.
+
+    Samples n_samples evenly-spaced points along the great-circle segment and
+    tests each against all active TFR polygons.  Stadium TFRs use a 3 nm
+    (5.6 km) radius check instead of polygon containment.
+
+    Args:
+        lat1: Departure helipad latitude.
+        lon1: Departure helipad longitude.
+        lat2: Arrival helipad latitude.
+        lon2: Arrival helipad longitude.
+        n_samples: Number of points to test along the segment.
+
+    Returns:
+        (hard_blocks, soft_warnings) — each a list of TFR dicts that were hit.
+        hard_blocks: type codes in _HARD_TFR_CODES → booking must be blocked.
+        soft_warnings: all other intersecting TFRs → show caution but allow.
+    """
+    try:
+        from src.notam import fetch_active_tfrs
+    except ImportError:
+        return [], []
+
+    try:
+        tfrs = fetch_active_tfrs()
+    except Exception as exc:
+        log.warning("TFR fetch failed during route check: %s", exc)
+        return [], []
+
+    sample_pts = [
+        (lat1 + (lat2 - lat1) * i / (n_samples - 1),
+         lon1 + (lon2 - lon1) * i / (n_samples - 1))
+        for i in range(n_samples)
+    ]
+
+    hard: list[dict] = []
+    soft: list[dict] = []
+    seen: set[str] = set()
+
+    for tfr in tfrs:
+        nid = tfr.get("notam_id", "")
+        if nid in seen:
+            continue
+        geo_type = tfr.get("geometry_type", "")
+        coords = tfr.get("coordinates", [])
+        hit = False
+
+        if geo_type == "Polygon" and len(coords) >= 3:
+            for lat, lon in sample_pts:
+                if _point_in_polygon(lat, lon, coords):
+                    hit = True
+                    break
+        elif geo_type == "Point" and coords:
+            # Stadium: 3 nm ≈ 5.556 km radius
+            clat, clon = coords[0]
+            for lat, lon in sample_pts:
+                if _haversine_km(lat, lon, clat, clon) <= 5.556:
+                    hit = True
+                    break
+
+        if hit:
+            seen.add(nid)
+            if tfr.get("type_code") in _HARD_TFR_CODES:
+                hard.append(tfr)
+            else:
+                soft.append(tfr)
+
+    return hard, soft
 
 
 # ── Step 3: Python routing engine ─────────────────────────────────────────────
@@ -581,7 +711,10 @@ def format_skyroute_response(route: dict, user_text: str) -> str:
                 )},
             ],
         )
-        return resp.choices[0].message.content.strip()
+        text = resp.choices[0].message.content.strip()
+        if len(text) < 50 or "book" not in text.lower():
+            return _template()
+        return text
     except Exception as exc:
         log.warning("Route formatting failed: %s", exc)
         return _template()
@@ -594,6 +727,7 @@ def run_agent(
     helipads: list[dict],
     user_lat: Optional[float] = None,
     user_lon: Optional[float] = None,
+    history: list[dict] | None = None,
 ) -> dict:
     """Full M4 pipeline: natural language → structured route → formatted response.
 
@@ -608,6 +742,7 @@ def run_agent(
         helipads: Available helipads as list of {lat, lon, name, ident}.
         user_lat: Current user latitude (used when origin not specified).
         user_lon: Current user longitude.
+        history: Prior conversation turns for multi-turn context (see extract_nav_params).
 
     Returns:
         Dict with: params, origin, destination, route, response, error.
@@ -623,8 +758,15 @@ def run_agent(
     }
 
     # Step 1 — Extract parameters
-    params = extract_nav_params(user_text)
+    params = extract_nav_params(user_text, history=history)
     result["params"] = params
+
+    if params.get("intent") == "off_topic":
+        result["error"] = (
+            "I handle helicopter routing in the New York metro area. "
+            "Try: \"I need to be at [destination] by [time].\""
+        )
+        return result
 
     if not params.get("destination_text"):
         result["error"] = (
@@ -637,8 +779,8 @@ def run_agent(
     dest_ll = geocode_place(params["destination_text"])
     if dest_ll is None:
         result["error"] = (
-            f"I couldn't locate \"{params['destination_text']}\". "
-            "Try a more specific address or landmark name."
+            "I handle helicopter routing in the New York metro area. "
+            "Try: \"I need to be at [destination] by [time].\""
         )
         return result
     result["destination"] = {
@@ -685,6 +827,31 @@ def run_agent(
         arrival_time=params.get("arrival_time"),
     )
     result["route"] = route
+
+    # Step 3b — TFR check on the aerial segment
+    pad_a = route.get("nearest_pad_origin")
+    pad_b = route.get("nearest_pad_dest")
+    ignore_tfrs = bool(params.get("ignore_tfrs", False))
+    if pad_a and pad_b:
+        hard_tfrs, soft_tfrs = _check_tfrs_on_segment(
+            float(pad_a["lat"]), float(pad_a["lon"]),
+            float(pad_b["lat"]), float(pad_b["lon"]),
+        )
+        if hard_tfrs and not ignore_tfrs:
+            names = "; ".join(t.get("text", "Unknown TFR") for t in hard_tfrs[:2])
+            result["error"] = (
+                f"Active airspace closure on this route: {names}. "
+                "Booking is not possible until the TFR lifts. "
+                "To plan anyway, add \"ignore TFRs\" to your request. "
+                "Check tfr.faa.gov for the latest status."
+            )
+            return result
+        all_warnings = [t.get("text", "Active TFR") for t in hard_tfrs + soft_tfrs]
+        result["tfr_warnings"] = all_warnings
+        result["tfrs_ignored"] = ignore_tfrs and bool(hard_tfrs)
+    else:
+        result["tfr_warnings"] = []
+        result["tfrs_ignored"] = False
 
     # Step 4 — Format narrative
     result["response"] = format_skyroute_response(route, user_text)
