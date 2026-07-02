@@ -20,8 +20,17 @@ data/*.json
 data/*.geojson
 data/*.xlsx
 data/adip_raw/
-# YOLO dataset — large image tiles, never commit
-data/yolo_dataset/
+# inspector_results.csv and test chips are committed for Streamlit Cloud deployment
+!data/inspector_results.csv
+# YOLO dataset — large image tiles never commit (train/val); test chips committed for cloud Inspector
+data/yolo_dataset/images/train/
+data/yolo_dataset/images/val/
+data/yolo_dataset/labels/
+data/yolo_dataset/review_train/
+data/yolo_dataset/review_test/
+data/yolo_dataset/review_decisions.csv
+data/yolo_dataset/build_log.csv
+data/yolo_dataset/dataset.yaml
 data/helipadcat_raw.csv
 data/faa_national.csv
 
