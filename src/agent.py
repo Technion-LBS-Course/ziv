@@ -137,8 +137,12 @@ def _get_groq_client():
     key = os.getenv("GROQ_API_KEY")
     if not key:
         try:
-            import streamlit as st
-            key = st.secrets.get("GROQ_API_KEY")
+            # Only access st.secrets when inside a valid Streamlit script run context.
+            # Calling it outside that context raises "SessionInfo before initialized".
+            from streamlit.runtime.scriptrunner import get_script_run_ctx
+            if get_script_run_ctx() is not None:
+                import streamlit as st
+                key = st.secrets.get("GROQ_API_KEY", "")
         except Exception:
             pass
     if not key:

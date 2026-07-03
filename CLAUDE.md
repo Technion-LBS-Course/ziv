@@ -668,11 +668,74 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 - [ ] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges in routing simulator; VFR/MVFR/IFR colour coding
 - [ ] Precipitation warning banner — NWS per-waypoint intensity check; `st.warning()` banner when intensity > mode threshold
 - [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
-- [ ] Streamlit Cloud deployment — set `TOMTOM_API_KEY`, `GROQ_API_KEY`, `MAPILLARY_TOKEN`, `MAPBOX_TOKEN`, `FAA_API_KEY` as platform env vars
 
 ### Final milestone checklist (21 Jul 2026 — Demo Day)
 
-- [ ] All remaining M4 items above
+- [ ] All remaining items above
 - [ ] End-to-end demo run: Miles Urban persona, NYC → Greenwich CT, live TFR + weather layers, multimodal route with aerial advantage callout
 - [ ] `Worklog.md` updated with Final session notes
-- [ ] Stable public URL added to README header
+
+---
+
+## Streamlit Cloud Deployment
+
+**Live URL:** https://skyroute.streamlit.app
+
+### packages.txt (apt system libraries)
+
+```
+libgl1
+libglib2.0-0t64
+```
+
+- `libgl1` — provides `libGL.so.1` required by `opencv-python` (full version that ultralytics installs alongside headless)
+- `libglib2.0-0t64` — provides `libgthread-2.0.so.0` required by `cv2` native module. On Debian **trixie** the package was renamed from `libglib2.0-0` → `libglib2.0-0t64` as part of the 64-bit time_t transition. The old name pulls in `libffi7` which is not available on trixie and aborts apt entirely — always use `libglib2.0-0t64`.
+
+### Python dependency constraints (requirements.txt)
+
+- `numpy>=1.26.0,<2.0.0` — `torch==2.0.1` was compiled against NumPy 1.x ABI; `numpy>=2.0` breaks `torch.from_numpy` with `RuntimeError: Numpy is not available`
+- `opencv-python-headless>=4.9.0,<4.11.0` — ultralytics also installs `opencv-python` (full), so both end up installed; `libgl1` + `libglib2.0-0t64` cover the missing shared libraries for both
+
+### Secrets management
+
+Streamlit Community Cloud exposes every secret from the dashboard as an OS environment variable automatically. All `os.getenv("KEY")` calls in the codebase work without any extra code. Add secrets at: **App settings → Secrets** in TOML format:
+
+```toml
+GROQ_API_KEY = "gsk_..."
+TOMTOM_API_KEY = "..."
+MAPBOX_TOKEN = "pk.eyJ1..."
+MAPILLARY_TOKEN = "MLY|..."
+FAA_API_KEY = "..."
+ANTHROPIC_API_KEY = "sk-ant-..."
+```
+
+**CRITICAL — never call `st.secrets` at module level.** Streamlit raises "Tried to use SessionInfo before it was initialized" if `st.secrets` is accessed outside a valid script run context (e.g. during import, in a `@st.cache_resource` function body, or in a background thread). Always guard with:
+```python
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+if get_script_run_ctx() is not None:
+    key = st.secrets.get("MY_KEY", "")
+```
+Or better: rely on `os.getenv()` alone — Streamlit Cloud already put the secret there.
+
+### Data files committed for Cloud (gitignore exceptions)
+
+The `data/` directory is gitignored, but two paths are committed so the Inspector tab works without a local data pipeline:
+
+| Path | Size | Purpose |
+|------|------|---------|
+| `data/inspector_results.csv` | ~60 KB | Pre-computed TP/TN/FP/FN for all 747 test helipads — fast-path for `_get_test_results()` |
+| `data/yolo_dataset/images/test/` | 40.5 MB (747 JPEGs) | NAIP chips for the Inspector's chip viewer |
+
+`.gitignore` uses `!data/inspector_results.csv` and replaces the blanket `data/yolo_dataset/` rule with per-subdirectory exclusions (train/, val/, labels/, review_*/ excluded; test/ kept). Do not re-add `data/yolo_dataset/` as a blanket rule — it would override the exceptions.
+
+### Deployment pitfall history
+
+| Error | Root cause | Fix |
+|-------|-----------|-----|
+| `libffi7` not installable | `libglib2.0-0` (bullseye) in packages.txt | Replace with `libglib2.0-0t64` (trixie) |
+| `libGL.so.1` not found | `libgl1` missing | Add `libgl1` to packages.txt |
+| `libgthread-2.0.so.0` not found | `libglib2.0-0t64` missing | Add `libglib2.0-0t64` to packages.txt |
+| `RuntimeError: Numpy is not available` | numpy≥2.0 installed; torch 2.0.1 needs 1.x | Pin `numpy>=1.26.0,<2.0.0` in requirements.txt |
+| `cannot import name 'bbox_px_to_bounds'` | Upstream symptom of libGL/libgthread failure | Fix the library, not the import |
+| `FileNotFoundError: faa_adip_enriched.csv` | data/ gitignored | `_get_test_results()` returns empty DataFrame when `_TEST_IMG_DIR` missing |
+| `Bad message format: SessionInfo before initialized` | `st.secrets` called outside script run context | Guard with `get_script_run_ctx() is not None` before any `st.secrets` access |

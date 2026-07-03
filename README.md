@@ -2,6 +2,8 @@
 
 > *"Door-to-sky-to-door. Your fastest path, elevated."*
 
+🌐 **Live demo:** https://skyroute.streamlit.app
+
 ---
 
 ## One-Liner
@@ -312,8 +314,8 @@ app.py (Streamlit)
 | M1 | 19 May 2026 | ✅ DONE | Repo, README, Sprint Plan, Pitch |
 | M2 | 02 Jun 2026 | ✅ DONE | Real data in app, EDA & HIE tab (3 charts + KPI density map), ADIP enrichment, cross-source matching |
 | M3 | 23 Jun 2026 | ✅ DONE | 4-model visual detection comparison (YOLO11m P=0.931 F1=0.888), XGBoost structured baseline (F1=0.73), live Inspector + live inference in app |
-| M4 | 14 Jul 2026 | 🔄 IN PROGRESS | TFR overlay, NWS radar, TomTom routing, Mapbox traffic basemap, validated OSM pool, LLM Route Assistant + booking flow |
-| Final | 21 Jul 2026 | ⏳ PENDING | Demo Day, stable URL, documented |
+| M4 | 14 Jul 2026 | ✅ DONE | TFR overlay, NWS radar, TomTom routing, Mapbox traffic basemap, validated OSM pool, LLM Route Assistant + booking flow, Streamlit Cloud deployment |
+| Final | 21 Jul 2026 | 🔄 IN PROGRESS | Demo Day polish, METAR/TAF panel, precipitation warnings, registry accuracy analysis |
 
 ### M3 Completed Deliverables
 
@@ -355,18 +357,20 @@ app.py (Streamlit)
 | **Geocoding pipeline** | ✅ Done | TomTom Fuzzy Search → LLM address extraction → Nominatim; handles business names and floor-level addresses |
 | **TFR pre-booking check** | ✅ Done | `_check_tfrs_on_segment()` in `src/agent.py` — samples 7 points along aerial segment; hard blocks (SECURITY/STADIUM/NDA_TFR) prevent booking; soft warnings shown as `st.warning()` banners before route narrative |
 
-### M4 Remaining Items
+### M4 Additional Completed Items
 
-- [ ] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges in routing simulator; VFR/MVFR/IFR colour coding
-- [ ] Precipitation warning banner — per-waypoint NWS intensity check; `st.warning()` banner above routing output when intensity > threshold
-- [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
+| Task | Status | Notes |
+|------|--------|-------|
+| Streamlit Cloud deployment | ✅ Done | Live at https://skyroute.streamlit.app — `packages.txt` (libgl1 + libglib2.0-0t64), secrets via dashboard |
+| Inspector test chips committed | ✅ Done | 747 NAIP chips (40.5 MB) + `inspector_results.csv` committed so Inspector works on Cloud |
+| Agent `st.secrets` guard | ✅ Done | `get_script_run_ctx()` check prevents "SessionInfo before initialized" on booking |
 
 ### Final Milestone Checklist (21 Jul 2026 — Demo Day)
 
-- [ ] Complete remaining M4 items above
-- [ ] Streamlit Cloud deployment — set `TOMTOM_API_KEY`, `GROQ_API_KEY`, `MAPILLARY_TOKEN`, `MAPBOX_TOKEN`, `FAA_API_KEY` as platform env vars
-- [ ] Stable public URL in README header
-- [ ] End-to-end demo walkthrough: Miles Urban persona, NYC → Greenwich CT, live TFR + weather layers, multimodal route with aerial advantage callout
+- [ ] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges; VFR/MVFR/IFR colour coding
+- [ ] Precipitation warning banner — per-waypoint NWS intensity check; `st.warning()` above routing output
+- [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
+- [ ] End-to-end demo walkthrough: Miles Urban persona, NYC → Greenwich CT, live TFR + weather, multimodal route with aerial advantage callout
 - [ ] `Worklog.md` updated with Final session notes
 
 ---
@@ -439,8 +443,9 @@ ziv/
 │   └── helipad_run_rtdetr_l/weights/best.pt
 ├── assets/
 │   └── helipad_grounding_dino.jpg  ← early zero-shot experiment reference image
-├── data/                   ← All data files — gitignored
-│   └── yolo_dataset/       ← NAIP chips + YOLO labels + review decisions
+├── data/                   ← Most data files gitignored; exceptions below committed for Cloud
+│   ├── inspector_results.csv          ← committed — pre-computed TP/TN/FP/FN for Inspector tab
+│   └── yolo_dataset/images/test/      ← committed — 747 NAIP test chips (40.5 MB) for Inspector tab
 └── notebooks/
     └── 01_eda.ipynb        ← EDA (M2)
 ```
