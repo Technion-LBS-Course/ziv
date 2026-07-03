@@ -42,15 +42,15 @@ Beyond routing, the underlying infrastructure data is broken. Public helipad dat
 
 ## Helipad Intelligence Engine (HIE) — ML Architecture
 
-Raw helipad databases (FAA, OSM) are incomplete, stale, and contain military or decommissioned pads. HIE is a **3-phase ML pipeline** that validates every candidate pad before it enters the routing engine.
+Raw helipad databases (FAA, OSM) are incomplete, stale, and contain military or decommissioned pads. HIE is a **2-phase ML pipeline** that validates every candidate pad before it enters the routing engine.
 
 ```
-Raw Input              Phase 1                       Phase 2                 Phase 3 ⭐             Output
-FAA · OSM  →  YOLO11m visual detection   →  LLM text / status  →  ADIP arrival  →  ✅ Validated pad
-747+ records   cascade: CV → YOLO11m fine-tuned   search grounding       coordination     added to routing
+Raw Input              Phase 1                              Phase 2 ⭐              Output
+FAA · OSM  →  YOLO11m visual detection          →  ADIP structured scoring  →  ✅ Validated pad
+747+ records   cascade: CV → YOLO11m fine-tuned     XGBoost on 17 features      added to routing
 ```
 
-### Why Three Phases?
+### Why Two Phases?
 
 Visual detection alone cannot validate all helipads. A significant fraction of real, operational pads are **visually invisible in NAIP imagery**: grass/turf fields with only a windsock, rooftops with no painted marking, pads built after the most recent NAIP acquisition (2–3 year update cycle), or faded private estate pads. For these, YOLO correctly fires nothing — not because the pad is decommissioned, but because there is no visual evidence at 0.156 m/px resolution.
 
@@ -58,18 +58,17 @@ This means YOLO Recall < 1.0 is a property of the imagery, not a model failure. 
 
 | FN type | Cause | Correct handling |
 |---------|-------|-----------------|
-| **Type A** — stale record | Registry still lists a decommissioned pad; nothing is there | Exclude from routing pool |
-| **Type B** — invisible helipad | Operational pad with no visual marker; YOLO misses it | Validate via Phases 2+3 |
+| **Type A** — stale record | Registry still lists a decommissioned pad; nothing is there | Exclude via Phase 2 structured scoring |
+| **Type B** — invisible helipad | Operational pad with no visual marker; YOLO misses it | Recover via Phase 2 ADIP status fields |
 
-Phase 1 cannot distinguish these two cases on its own. Phases 2 and 3 exist to recover Type B cases and confirm Type A exclusions using independent evidence signals:
+Phase 1 cannot distinguish these two cases on its own. Phase 2 uses independent structured evidence to recover Type B cases and confirm Type A exclusions:
 
 | Phase | Signal | Handles |
 |-------|--------|---------|
 | **Phase 1 — Visual** | NAIP imagery chip + YOLO11m (production) / YOLO11s (discovery mode) | Visually marked pads (H, cross, circle, rooftop paint) |
-| **Phase 2 — LLM/Status** | FAA ADIP status + LLM search grounding | Named pads regardless of visual marker; military/hospital/closure detection |
-| **Phase 3 — ADIP Dims** | TLOF/FATO survey data, inspection date, ATC contacts | Operationally documented pads with authoritative survey records |
+| **Phase 2 — Structured** | FAA ADIP status, ownership type, military flags, inspection age, XGBoost scoring | Named pads regardless of visual marker; military/private/closure filtering; stale-record detection |
 
-The final `hie_score` (0–100) blends all three phases — it is **not** a hard gate on visual detection. A hospital rooftop helipad with no painted H but a current ADIP operational status and recent inspection will score high even if Phase 1 returns no detection.
+The final routing pool blends both phases — it is **not** a hard gate on visual detection alone. A hospital rooftop helipad with no painted H but a current ADIP operational status and recent inspection will still be included even if Phase 1 returns no detection.
 
 ### Phase 1 — Visual Validation (YOLO11m fine-tuned cascade)
 
@@ -89,13 +88,13 @@ The detected bounding-box centroid is back-projected to geographic coordinates a
 
 All four fine-tuned YOLO models substantially outperform the XGBoost structured baseline, confirming that aerial imagery adds decisive signal beyond what registry metadata alone can provide. YOLO11m is the **production model** (highest precision, fewest false positives); YOLO11s is retained for registry cleaning sweeps where recall matters more.
 
-### Phase 2 — LLM Text/Status Validation
+### Phase 2 — Structured Status Validation (ADIP + XGBoost)
 
-For candidates that pass Phase 1, a retrieval-augmented LLM query (Gemini / GPT-4o with search grounding) takes the helipad name and coordinates and searches for evidence of closure, restricted access, or military designation. Example: the OSM node "Caven Point USAR" is correctly identified as a military-use pad ineligible for civilian routing, without any labeled training example.
+For every candidate pad, FAA ADIP structured fields provide authoritative status signals that NAIP imagery cannot: `adip_status` (Operational / Closed / Restricted), `MIL_CODE` (Army / Navy / Air Force / Marines / Coast Guard → excluded from civilian routing), `PRIVATEUSE` (prior coordination required), inspection age, and TLOF/FATO survey records. These fields are mapped at load time in `src/data.py` and used as features in the XGBoost structured classifier (`scripts/train_xgboost.py`), which scores each pad's operational risk independently of any imagery.
 
-### Phase 3 — ADIP Arrival Coordination (stretch goal)
+The booking flow in `src/agent.py` applies the same flags at runtime: military and private-use helipads generate coordination warnings before a leg is confirmed. Cryptic FAA coordination remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) are decoded to plain English by an LLM call (`_decode_adip_remarks()`) so passengers see actionable arrival instructions, not raw FAA notation.
 
-For validated FAA helipads, the ADIP Airport Master Record provides TLOF/FATO dimensions, design category, last inspection date, ATC contact, EV charging availability, and ingress/egress bearings. This data feeds the routing engine's arrival planning and operator handoff layer.
+For validated FAA helipads the ADIP record also provides TLOF/FATO dimensions, design category, last inspection date, ATC contact frequencies, EV charging availability, and ingress/egress bearings — feeding the routing engine's arrival planning layer.
 
 ---
 
@@ -172,7 +171,7 @@ For validated FAA helipads, the ADIP Airport Master Record provides TLOF/FATO di
 
 ## Formal ML Problem Statement
 
-HIE combines three validation signals — visual (imagery-based object detection), textual (LLM search grounding), and structured (ADIP registry). This section covers both components.
+HIE combines two validation signals — visual (imagery-based object detection) and structured (ADIP registry + XGBoost scoring). This section covers both components.
 
 ### Baseline Model — XGBoost Structured Classifier
 
@@ -229,7 +228,7 @@ The core M3 ML task is **conformal helipad identification from aerial imagery**:
 - YOLO11m achieves **P=0.931** — exceeding the > 0.95 precision KPI at precision-optimised thresholds (≥ 0.50 conf), and **FP=27** (fewest false positives across all models).
 - YOLO11s achieves **R=0.866** — finding 28 more real helipads than YOLOv8s while adding only 2 extra FPs; preferred for high-coverage use cases.
 - RT-DETR-L improves over YOLOv8s (F1=0.859 vs 0.850), confirming transformer detectors can learn this aerial imagery domain. Its training instability (loss divergence at epoch 32) is attributed to small batch size (4) and may improve with `--batch 8 --lr0 0.0001`.
-- **~38 % of FAA-listed helipads have no visual marker** in NAIP imagery (visually invisible pads). This bounds maximum recall regardless of model — it is a property of the imagery and registry staleness, not a model limitation. Phases 2+3 of HIE recover these cases.
+- **~38 % of FAA-listed helipads have no visual marker** in NAIP imagery (visually invisible pads). This bounds maximum recall regardless of model — it is a property of the imagery and registry staleness, not a model limitation. Phase 2 (ADIP structured scoring) recovers these cases.
 
 ---
 

@@ -386,10 +386,9 @@ st.tabs(["📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE", "�
 - Journey comparison: without SkyRoute (92 min, 3 apps) vs with SkyRoute (36 min, 1 booking)
 - 4 KPI metrics (time saved, trips/week, hours reclaimed, booking friction)
 - Stakeholder ecosystem (4 cards: Operators, Passengers, Vertiport Owners, Regulators)
-- HIE ML pipeline flow banner + 3-phase detail:
-  - Phase 1: Grounding DINO visual validation (satellite chip → bounding box)
-  - Phase 2: LLM text/status validation (Gemini search grounding, Caven Point example)
-  - Phase 3: ADIP arrival coordination — stretch goal
+- HIE ML pipeline flow banner + 2-phase detail:
+  - Phase 1: YOLO11m visual detection (NAIP satellite chip → bounding box)
+  - Phase 2: ADIP structured scoring (XGBoost on 17 features; military/private flags; arrival coordination remarks decoded by LLM)
 
 **Tab 2 — Literature**
 - Quick Reference table: article, field of relevance, DOI link
