@@ -44,6 +44,16 @@ from folium.plugins import MarkerCluster, MeasureControl, HeatMap
 from streamlit_folium import st_folium
 import streamlit.components.v1 as components
 
+# On Streamlit Cloud, secrets live in st.secrets (not .env).
+# Copy them into os.environ so every os.getenv() call in this file works in both contexts.
+# load_dotenv() above already ran, so setdefault() lets the local .env win.
+try:
+    for _k, _v in st.secrets.items():
+        if isinstance(_v, str):
+            os.environ.setdefault(_k, _v)
+except Exception:
+    pass
+
 from src.analysis import (
     build_consistency_table,
     faa_completeness,
@@ -4512,7 +4522,8 @@ with tab_agent:
     if not os.getenv("GROQ_API_KEY"):
         st.warning(
             "GROQ_API_KEY not set — responses will use template text. "
-            "Add it to `.env` and restart.",
+            "Local: add it to `.env` and restart. "
+            "Streamlit Cloud: add it under **Settings → Secrets**.",
             icon="⚠️",
         )
 
