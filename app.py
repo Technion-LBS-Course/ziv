@@ -2302,7 +2302,7 @@ with tab_eda:
 </style>
 <script>
 (function(){
-    var _f=false,_n=0;
+    var _n=0;
     var _iv=setInterval(function(){
         _n++;
         var el=document.querySelector('.leaflet-container');
@@ -2310,11 +2310,7 @@ with tab_eda:
             var lMap=window[el.id];
             if(lMap&&typeof lMap.getSize==='function'){
                 var s=lMap.getSize();
-                if(s.x===0||s.y===0){lMap.invalidateSize(true);}
-                else if(!_f){
-                    _f=true;
-                    if(lMap.zoomControl){lMap.zoomControl.remove();lMap.zoomControl.addTo(lMap);}
-                }
+                if(s.x===0||s.y===0){lMap.invalidateSize(false);}
             }
         }
         if(_n>50){clearInterval(_iv);}
@@ -2856,7 +2852,7 @@ with tab_eda:
     from branca.element import Element as _El
     dm.get_root().html.add_child(_El("""
 <style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style>
-<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0){lMap.invalidateSize(true);}else if(!_f){_f=true;if(lMap.zoomControl){lMap.zoomControl.remove();lMap.zoomControl.addTo(lMap);}}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
+<script>(function(){var _n=0,_iv=setInterval(function(){_n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0)lMap.invalidateSize(false);}}if(_n>50)clearInterval(_iv);},400);})();</script>"""))
 
     # ── render density map + KPI panel ───────────────────────────────────
     col_map, col_kpi = st.columns([3, 1])
@@ -3007,7 +3003,7 @@ with tab_eda:
     folium.LayerControl(collapsed=False).add_to(sm)
     sm.get_root().html.add_child(_El("""
 <style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style>
-<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0){lMap.invalidateSize(true);}else if(!_f){_f=true;if(lMap.zoomControl){lMap.zoomControl.remove();lMap.zoomControl.addTo(lMap);}}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
+<script>(function(){var _n=0,_iv=setInterval(function(){_n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0)lMap.invalidateSize(false);}}if(_n>50)clearInterval(_iv);},400);})();</script>"""))
     st_folium(sm, width=None, height=480, returned_objects=[], key="hotspot_map")
 
     hs_df = pd.DataFrame(hs_rows).set_index("Business Centre")
@@ -3148,7 +3144,7 @@ with tab_eda:
     folium.LayerControl(collapsed=False).add_to(rm)
     rm.get_root().html.add_child(_El("""
 <style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style>
-<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0){lMap.invalidateSize(true);}else if(!_f){_f=true;if(lMap.zoomControl){lMap.zoomControl.remove();lMap.zoomControl.addTo(lMap);}}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
+<script>(function(){var _n=0,_iv=setInterval(function(){_n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0)lMap.invalidateSize(false);}}if(_n>50)clearInterval(_iv);},400);})();</script>"""))
     st_folium(rm, width=None, height=460, returned_objects=[], key="res_spider_map")
 
     res_df = pd.DataFrame(res_rows).set_index("Residence")
@@ -3669,7 +3665,7 @@ def _inspector_content() -> None:
                         tooltip=f"YOLO bbox  conf={res_a_now['confidence']:.2f}",
                     ).add_to(m_a)
                 folium.LayerControl(collapsed=False).add_to(m_a)
-                m_a.get_root().html.add_child(_BE("""<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style><script>(function(){var _f=false,n=0,iv=setInterval(function(){n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(n>50)clearInterval(iv);},400);})();</script>"""))
+                m_a.get_root().html.add_child(_BE("""<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style><script>(function(){var n=0,iv=setInterval(function(){n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0)lMap.invalidateSize(false);}}if(n>50)clearInterval(iv);},400);})();</script>"""))
                 st_folium(m_a, key=f"insp_a_map_{ver_a}", width=None, height=310,
                           returned_objects=[])
 
@@ -3787,7 +3783,7 @@ def _inspector_content() -> None:
                     tooltip=f"YOLO ESRI  conf={res_b_esri['confidence']:.2f}",
                 ).add_to(m_b)
             folium.LayerControl(collapsed=False).add_to(m_b)
-            m_b.get_root().html.add_child(_BE("""<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style><script>(function(){var _f=false,n=0,iv=setInterval(function(){n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(n>50)clearInterval(iv);},400);})();</script>"""))
+            m_b.get_root().html.add_child(_BE("""<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style><script>(function(){var n=0,iv=setInterval(function(){n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0)lMap.invalidateSize(false);}}if(n>50)clearInterval(iv);},400);})();</script>"""))
 
             map_out_b = st_folium(m_b, key=f"insp_b_map_{ver_b}", width=None, height=390,
                                   returned_objects=["last_object_clicked"])
@@ -4061,7 +4057,7 @@ def _inspector_content() -> None:
                         ).add_to(m_c)
 
                     folium.LayerControl(collapsed=True).add_to(m_c)
-                    m_c.get_root().html.add_child(_BE("""<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style><script>(function(){var _f=false,n=0,iv=setInterval(function(){n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(n>50)clearInterval(iv);},400);})();</script>"""))
+                    m_c.get_root().html.add_child(_BE("""<style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style><script>(function(){var n=0,iv=setInterval(function(){n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0)lMap.invalidateSize(false);}}if(n>50)clearInterval(iv);},400);})();</script>"""))
 
                     map_out_c = st_folium(
                         m_c, key=f"insp_c_map_{ver_c}",
