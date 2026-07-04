@@ -4976,14 +4976,24 @@ def _route_assistant_content() -> None:
                     )
 
                     with st.expander("Resolved locations", expanded=False):
+                        def _fmt_loc(loc: dict) -> str:
+                            parts = []
+                            if loc.get("poi_name"):
+                                parts.append(f"**{loc['poi_name']}**")
+                            if loc.get("address"):
+                                parts.append(loc["address"])
+                            parts.append(
+                                f"`{loc.get('lat',0):.5f}, {loc.get('lon',0):.5f}`"
+                            )
+                            return "  \n".join(parts)
                         _lc1, _lc2 = st.columns(2)
                         _lc1.markdown(
                             f"**Origin:** {_orig.get('text','—')}  \n"
-                            f"`{_orig.get('lat',0):.5f}, {_orig.get('lon',0):.5f}`"
+                            + _fmt_loc(_orig)
                         )
                         _lc2.markdown(
                             f"**Destination:** {_dest.get('text','—')}  \n"
-                            f"`{_dest.get('lat',0):.5f}, {_dest.get('lon',0):.5f}`"
+                            + _fmt_loc(_dest)
                         )
 
                 # ── Booking display (if confirm_booking tool was called) ───

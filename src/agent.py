@@ -492,7 +492,12 @@ def _geocode_tomtom(place_name: str) -> Optional[tuple[float, float]]:
         resp.raise_for_status()
         results = resp.json().get("results", [])
         if results:
-            pos = results[0]["position"]
+            item = results[0]
+            pos = item["position"]
+            _geocode_rich_cache[place_name.lower().strip()] = {
+                "poi_name": item.get("poi", {}).get("name", ""),
+                "address":  item.get("address", {}).get("freeformAddress", ""),
+            }
             return float(pos["lat"]), float(pos["lon"])
     except Exception as exc:
         log.warning("TomTom geocode failed for '%s': %s", place_name, exc)
@@ -563,6 +568,9 @@ def geocode_place(place_name: str) -> Optional[tuple[float, float]]:
         result = _geocode_tomtom(cleaned)
         if result:
             _geocode_cache[cache_key] = result
+            # Propagate rich data to the original (unclean) key so callers can look it up
+            if cleaned.lower().strip() in _geocode_rich_cache:
+                _geocode_rich_cache[cache_key] = _geocode_rich_cache[cleaned.lower().strip()]
             return result
 
     # 3. Nominatim fallback on cleaned address
@@ -580,6 +588,7 @@ _nws_cache: dict = {}           # key: "lat2,lon2" → (result_dict, fetched_at)
 _NWS_TTL_S = 600                # 10-minute cache
 _nws_gridpoint_cache: dict = {} # key: "lat2,lon2" → forecast_url (permanent — gridpoints never move)
 _geocode_cache: dict = {}       # key: place_name.lower().strip() → (lat, lon) | None
+_geocode_rich_cache: dict = {}  # key: place_name.lower().strip() → {poi_name, address}
 _poi_cache: dict = {}           # key: (location, category, radius_m) → result_dict
 
 # TomTom structured category codes — hard-filter results so keyword drift can't pull
@@ -1024,9 +1033,21 @@ def _execute_tool(
                     dest_name=dest_text,
                 )
                 result["route"] = route   # triggers app.py route display
-                # Store geocoded endpoints so app.py map display can read them
-                result["origin"]      = {"text": origin_text, "lat": origin_ll[0], "lon": origin_ll[1]}
-                result["destination"] = {"text": dest_text,   "lat": dest_ll[0],   "lon": dest_ll[1]}
+                # Store geocoded endpoints with rich display info for app.py
+                _orig_rich = _geocode_rich_cache.get(origin_text.lower().strip(), {})
+                _dest_rich = _geocode_rich_cache.get(dest_text.lower().strip(), {})
+                result["origin"] = {
+                    "text": origin_text,
+                    "lat":  origin_ll[0], "lon": origin_ll[1],
+                    "poi_name": _orig_rich.get("poi_name", ""),
+                    "address":  _orig_rich.get("address", ""),
+                }
+                result["destination"] = {
+                    "text": dest_text,
+                    "lat":  dest_ll[0],   "lon": dest_ll[1],
+                    "poi_name": _dest_rich.get("poi_name", ""),
+                    "address":  _dest_rich.get("address", ""),
+                }
 
             # TFR + weather advisory
             advisory_parts = []
