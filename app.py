@@ -2305,14 +2305,15 @@ with tab_eda:
     var _f=false,_n=0;
     var _iv=setInterval(function(){
         _n++;
-        if(typeof window.map!=='undefined'){
-            var s=window.map.getSize();
-            if(s.x===0||s.y===0){window.map.invalidateSize(true);}
-            else if(!_f){
-                _f=true;
-                if(window.map.zoomControl){
-                    window.map.zoomControl.remove();
-                    window.map.zoomControl.addTo(window.map);
+        var el=document.querySelector('.leaflet-container');
+        if(el){
+            var lMap=window[el.id];
+            if(lMap&&typeof lMap.getSize==='function'){
+                var s=lMap.getSize();
+                if(s.x===0||s.y===0){lMap.invalidateSize(true);}
+                else if(!_f){
+                    _f=true;
+                    if(lMap.zoomControl){lMap.zoomControl.remove();lMap.zoomControl.addTo(lMap);}
                 }
             }
         }
@@ -2855,7 +2856,7 @@ with tab_eda:
     from branca.element import Element as _El
     dm.get_root().html.add_child(_El("""
 <style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style>
-<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
+<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0){lMap.invalidateSize(true);}else if(!_f){_f=true;if(lMap.zoomControl){lMap.zoomControl.remove();lMap.zoomControl.addTo(lMap);}}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
 
     # ── render density map + KPI panel ───────────────────────────────────
     col_map, col_kpi = st.columns([3, 1])
@@ -3006,7 +3007,7 @@ with tab_eda:
     folium.LayerControl(collapsed=False).add_to(sm)
     sm.get_root().html.add_child(_El("""
 <style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style>
-<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
+<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0){lMap.invalidateSize(true);}else if(!_f){_f=true;if(lMap.zoomControl){lMap.zoomControl.remove();lMap.zoomControl.addTo(lMap);}}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
     st_folium(sm, width=None, height=480, returned_objects=[], key="hotspot_map")
 
     hs_df = pd.DataFrame(hs_rows).set_index("Business Centre")
@@ -3147,7 +3148,7 @@ with tab_eda:
     folium.LayerControl(collapsed=False).add_to(rm)
     rm.get_root().html.add_child(_El("""
 <style>.leaflet-top.leaflet-left{top:10px!important;left:10px!important;}.leaflet-control-zoom{margin:0!important;}</style>
-<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;if(typeof window.map!=='undefined'){var s=window.map.getSize();if(s.x===0||s.y===0){window.map.invalidateSize(true);}else if(!_f){_f=true;if(window.map.zoomControl){window.map.zoomControl.remove();window.map.zoomControl.addTo(window.map);}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
+<script>(function(){var _f=false,_n=0,_iv=setInterval(function(){_n++;var el=document.querySelector('.leaflet-container');if(el){var lMap=window[el.id];if(lMap&&typeof lMap.getSize==='function'){var s=lMap.getSize();if(s.x===0||s.y===0){lMap.invalidateSize(true);}else if(!_f){_f=true;if(lMap.zoomControl){lMap.zoomControl.remove();lMap.zoomControl.addTo(lMap);}}}}if(_n>50){clearInterval(_iv);}},400);})();</script>"""))
     st_folium(rm, width=None, height=460, returned_objects=[], key="res_spider_map")
 
     res_df = pd.DataFrame(res_rows).set_index("Residence")
