@@ -1153,8 +1153,6 @@ _ROUTING_HTML_TEMPLATE = """<!DOCTYPE html>
     * { margin:0; padding:0; box-sizing:border-box; }
     html, body { width:100%; height:100%; overflow:hidden; font-family:'Segoe UI',sans-serif; }
     #map { width:100%; height:570px; }
-    .leaflet-top.leaflet-left { top:10px!important; left:10px!important; }
-    .leaflet-control-zoom { margin:0!important; }
     #aerial-bar {
       width:100%; height:54px;
       background:linear-gradient(90deg,#060b14,#0d1b2a,#060b14);
