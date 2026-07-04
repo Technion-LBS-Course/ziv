@@ -286,12 +286,14 @@ src/model.py             →  build_features()          (M3)
                             train_model()             (M3)
                             evaluate_model()          (M3)
 
-src/agent.py             →  run_agent()               (LLM route-planning loop, Groq/Llama)
-                            run_booking()             (booking flow: ADIP lookup, rideshare sim,
-                                                       Mapillary street-view thumbnails)
+src/agent.py             →  run_agent_v2()            (Level 1 agentic loop; 5 tools; Groq/Llama-3.3-70b)
+                            run_booking()             (booking: ADIP lookup + Mapillary;
+                                                       parallel HTTP via ThreadPoolExecutor)
                             geocode_place()           (TomTom Fuzzy Search → LLM clean → Nominatim)
+                            _tool_search_places()     (TomTom POI + categorySet hard filter)
+                            _tool_get_weather()       (NWS 2-step forecast; 10-min cache)
                             find_nearest_mapillary_image()   (server-side, no CORS)
-                            get_mapillary_thumb_url()        (direct CDN JPEG URL)
+                            get_mapillary_thumb_url()        (CDN JPEG URL; v4 ?pKey= format)
 
 app.py (Streamlit)
   ├── Tab: Problem        →  Persona · Journey comparison · HIE pipeline diagram
@@ -301,8 +303,109 @@ app.py (Streamlit)
   │                          KPI · Density heatmap · Routing simulator (Leaflet/JS)
   ├── Tab: Inspector      →  Test set chip viewer (TP/TN/FP/FN) · Live inference on click
   ├── Tab: Results        →  XGBoost structured baseline · 4-model YOLO comparison
-  └── Tab: Route Assistant →  Natural language routing · booking flow · Mapillary street view
+  └── Tab: Route Assistant →  Tool-calling LLM concierge · live thinking indicator · booking flow
 ```
+
+---
+
+## LLM Route Assistant — Architecture
+
+The Route Assistant tab (`src/agent.py`) is a **Level 1 agentic loop** — the model decides autonomously which tools to call, in what order, before generating a final response. It is not a prompt-response chatbot; it is a multi-step tool-calling concierge.
+
+### Concierge Identity and Hard Rules
+
+The model receives the **SkyRoute Concierge** system prompt at every turn: a personal travel assistant for executive air mobility in the New York metro area. Three mandatory rules are enforced in the system prompt to prevent hallucination from stale training-data knowledge:
+
+1. Never name a specific restaurant, hotel, or business without first calling `search_nearby_places`.
+2. Never state travel times or route details without first calling `compute_route`.
+3. Never state weather conditions without first calling `get_weather`.
+
+### Agentic Loop (`run_agent_v2`)
+
+```
+User message (natural language)
+        │
+        ▼  messages = [system_prompt] + history[-10] + [user_turn]
+┌──────────────────────────────────────────────────────────────┐
+│  while iterations < 8:                                       │
+│                                                              │
+│    Groq API call  ← model + 5 tool schemas + temperature=0  │
+│         │                                                    │
+│         ├── tool_calls in response?                          │
+│         │      for each tool_call:                           │
+│         │        status_callback("tool_call", ...)           │
+│         │        result = _execute_tool(name, args)          │
+│         │        status_callback("tool_result", ...)         │
+│         │        append {role:tool, content:result} to msgs  │
+│         │      continue loop                                 │
+│         │                                                    │
+│         └── text response (no tool_calls)?                   │
+│               break → return result dict                     │
+└──────────────────────────────────────────────────────────────┘
+        │
+        ▼
+result dict: {response, route, booking_legs, tfr_warnings, precip_warnings, error}
+        │
+        ▼
+app.py renders:  st.status() thinking panel · TFR warnings · precipitation warnings · route card · booking leg cards (with METAR badges)
+```
+
+**Primary model:** `llama-3.3-70b-versatile` (Groq, native tool calling)
+**Fallback model:** `llama-3.1-8b-instant` (auto-switch on quota/model error)
+**Max iterations:** 8 hard cap — prevents runaway tool loops
+**Temperature:** 0 — deterministic tool selection
+
+### The 5 Tools
+
+| Tool | Description | Key implementation detail |
+|------|-------------|--------------------------|
+| `geocode` | Convert place name / address → `{lat, lon}` | TomTom Fuzzy Search → LLM address extraction → Nominatim; handles business names and floor-level addresses |
+| `search_nearby_places` | Find restaurants, hotels, cafes, parking near a location | TomTom POI Search + `categorySet` hard filter; normalisation table maps "fine dining" → `7315`, "steakhouse" → `7315002`, etc. |
+| `get_weather` | NWS Point Forecast at any CONUS location | 2-step NWS API (points endpoint → forecast URL); 10-min in-process cache; returns temp, wind, precip chance, detailed forecast |
+| `compute_route` | Multimodal helicopter + ground route | `compute_skyroute()` → TFR segment check (7 sample points) → precipitation sampling → plain-English advisory |
+| `confirm_booking` | Book the confirmed route per leg | `run_booking()`: ADIP + METAR + Mapillary ID fetch in parallel (Phase 1: 6 threads); thumbnail URLs in parallel (Phase 2: 2 threads); latency ~3s vs ~12s serial |
+
+### Anti-Hallucination Guardrails
+
+| Risk | Defence |
+|------|---------|
+| Model names a restaurant from training data | System rule #1 — must call `search_nearby_places` first |
+| Model states travel time without calling routing | System rule #2 — must call `compute_route` first |
+| POI search returns off-category results (e.g. liquor store for "fine dining") | `categorySet` hard filter at TomTom API level |
+| Geocoding fails on business names with floor numbers | 3-tier cascade: TomTom → LLM address extraction → Nominatim |
+| `confirm_booking` triggered prematurely | Tool description instructs: call only when user explicitly says book/yes/confirm |
+| Model loops indefinitely | Hard cap: `max_iterations=8` |
+| Groq 70b quota exceeded | Auto-fallback to `llama-3.1-8b-instant` on `model_not_found` / `rate_limit` errors |
+| TFR in aerial corridor | `_check_tfrs_on_segment()` — time-aware (skips expired TFRs based on estimated aerial departure in US Eastern time); hard block (SECURITY/STADIUM/NDA_TFR/DEF) prevents booking; soft TFRs surfaced as `st.warning()` |
+| Precipitation on route | `check_route_precipitation()` — `warn` severity shown as `st.warning()` banner; `avoid` severity added to route advisory text |
+
+### Live Thinking Indicator
+
+While the loop runs, a collapsible `st.status()` panel shows real-time progress via a `status_callback` parameter on `run_agent_v2()` that fires at three points in the loop:
+
+```
+🤔 Thinking…
+🔍 Searching restaurants near 30th St Heliport
+   ↳ Found 4 results within 500 m
+🗺️ Computing route: Midtown → Greenwich CT
+   ↳ 36 min total · 56 min saved vs driving
+📦 Booking route (3 legs)
+   ↳ Confirmed — reference WX-4821
+```
+
+The panel collapses automatically when the response is ready.
+
+### Booking Flow Detail
+
+When `confirm_booking` fires, `run_booking()` generates structured cards for each leg:
+
+| Leg type | Trigger | Card content |
+|----------|---------|-------------|
+| **Walk** | distance < 0.5 km | Walking time (5 km/h) + Mapillary street thumbnail at departure point |
+| **Helicopter** | aerial segment | Departure helipad: METAR badge (VFR/MVFR/IFR/LIFR colour pill + wind/vis/ceiling) + ADIP status + decoded coordination note + Mapillary thumbnail · same for Arrival helipad |
+| **Rideshare** | ground > 0.5 km | Simulated fare estimate + Uber/Waymo deeplinks + Mapillary thumbnails at pickup and dropoff |
+
+ADIP coordination remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) are decoded to plain English by a separate LLM call (`_decode_adip_remarks()`) using `temperature=0.1` and an abbreviation expansion system prompt. Results are cached in-process by helipad ident.
 
 ---
 
@@ -313,8 +416,8 @@ app.py (Streamlit)
 | M1 | 19 May 2026 | ✅ DONE | Repo, README, Sprint Plan, Pitch |
 | M2 | 02 Jun 2026 | ✅ DONE | Real data in app, EDA & HIE tab (3 charts + KPI density map), ADIP enrichment, cross-source matching |
 | M3 | 23 Jun 2026 | ✅ DONE | 4-model visual detection comparison (YOLO11m P=0.931 F1=0.888), XGBoost structured baseline (F1=0.73), live Inspector + live inference in app |
-| M4 | 14 Jul 2026 | ✅ DONE | TFR overlay, NWS radar, TomTom routing, Mapbox traffic basemap, validated OSM pool, LLM Route Assistant + booking flow, Streamlit Cloud deployment |
-| Final | 21 Jul 2026 | 🔄 IN PROGRESS | Demo Day polish, METAR/TAF panel, precipitation warnings, registry accuracy analysis |
+| M4 | 04 Jul 2026 | ✅ DONE | TFR overlay, NWS radar, TomTom routing, Mapbox traffic basemap, validated OSM pool, LLM Route Assistant + booking flow, Streamlit Cloud deployment |
+| Final | 21 Jul 2026 | 🔄 IN PROGRESS | Demo Day polish; METAR/TAF per-leg badges ✅, precipitation warnings ✅, registry accuracy analysis |
 
 ### M3 Completed Deliverables
 
@@ -363,11 +466,19 @@ app.py (Streamlit)
 | Streamlit Cloud deployment | ✅ Done | Live at https://skyroute.streamlit.app — `packages.txt` (libgl1 + libglib2.0-0t64), secrets via dashboard |
 | Inspector test chips committed | ✅ Done | 747 NAIP chips (40.5 MB) + `inspector_results.csv` committed so Inspector works on Cloud |
 | Agent `st.secrets` guard | ✅ Done | `get_script_run_ctx()` check prevents "SessionInfo before initialized" on booking |
+| **`run_agent_v2()` — Level 1 tool-calling loop** | ✅ Done | 5 tools (geocode, search_nearby_places, get_weather, compute_route, confirm_booking); Groq/Llama-3.3-70b-versatile with llama-3.1-8b-instant fallback |
+| **`st.status()` live thinking indicator** | ✅ Done | `status_callback` parameter fires at each Groq call and tool execution → collapses when done |
+| **Route Assistant fragment isolation** | ✅ Done | `@st.experimental_fragment` — chat messages no longer trigger rebuilding of 4 Folium maps |
+| **Parallel booking** (`ThreadPoolExecutor`) | ✅ Done | ADIP lookups + Mapillary ID fetches batched in 2 parallel phases; ~3s vs ~12s serial |
+| **Module-level caches** | ✅ Done | `_geocode_cache`, `_poi_cache`, `_nws_gridpoint_cache` — eliminate redundant HTTP calls |
+| **POI `categorySet` hard filter** | ✅ Done | `_TOMTOM_CATEGORY_MAP` normalises "fine dining" → `7315`; filter applied at API level, prevents off-category drift |
+| **Mapillary v4 URL fix** | ✅ Done | `?pKey=` (v4) replaces `?image_key=` (v3, broken) in "Open in Mapillary" links |
+| **Routing simulator zoom control** | ✅ Done | Moved to `bottomleft` (`zoomControl:false` + `L.control.zoom({position:'bottomleft'})`) — no longer clipped by layer control panel |
 
 ### Final Milestone Checklist (21 Jul 2026 — Demo Day)
 
-- [ ] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges; VFR/MVFR/IFR colour coding
-- [ ] Precipitation warning banner — per-waypoint NWS intensity check; `st.warning()` above routing output
+- [x] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges; VFR/MVFR/IFR colour coding
+- [x] Precipitation warning banner — per-waypoint NWS intensity check; `st.warning()` above routing output
 - [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
 - [ ] End-to-end demo walkthrough: Miles Urban persona, NYC → Greenwich CT, live TFR + weather, multimodal route with aerial advantage callout
 - [ ] `Worklog.md` updated with Final session notes

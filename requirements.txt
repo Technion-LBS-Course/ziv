@@ -49,6 +49,7 @@ anthropic>=0.40.0,<0.50.0
 groq>=0.9.0,<0.15.0
 
 # ── utilities ────────────────────────────────────────────────────────────────
+tzdata>=2024.1          # IANA timezone DB for zoneinfo (needed on Windows + Streamlit Cloud)
 python-dotenv>=1.0.0,<1.1.0
 tqdm>=4.66.0,<4.67.0
 openpyxl>=3.1.0,<3.2.0

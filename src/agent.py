@@ -20,6 +20,7 @@ import os
 import pathlib
 import random
 import string
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import requests
@@ -121,8 +122,162 @@ def _decode_adip_remarks(remarks: list, ident: str, name: str) -> str:
         log.warning("Remarks decode LLM failed for %s: %s", ident, exc)
         return f"Remarks: {raw}"
 
-_GROQ_MODEL         = "llama-3.1-8b-instant"
+_GROQ_MODEL         = "llama-3.1-8b-instant"       # fallback — always enabled
 _GROQ_MODEL_FAST    = "meta-llama/llama-4-scout-17b-16e-instruct"  # if enabled in project settings
+_GROQ_MODEL_70B     = "llama-3.3-70b-versatile"   # Level 1 tool calling (enable in Groq console)
+
+# ── Level 1 tool-calling concierge (run_agent_v2) ─────────────────────────────
+
+_CONCIERGE_SYSTEM = """You are SkyRoute Concierge — a personal travel assistant for \
+executive air mobility in the New York metro area. Your user is a busy VP who travels \
+4-5×/week and values time above all else.
+
+You have access to these tools:
+- geocode: convert addresses or place names to coordinates
+- search_nearby_places: find restaurants, hotels, cafes, or businesses near any location
+- get_weather: current conditions and forecast at any location
+- compute_route: multimodal helicopter + ground route with time comparison
+- confirm_booking: book a confirmed route
+
+MANDATORY rules:
+1. Never name a specific restaurant, hotel, or business without first calling \
+search_nearby_places. Your training knowledge about specific places is unreliable.
+2. Never state travel times or route details without first calling compute_route.
+3. Never state weather conditions without first calling get_weather.
+4. If a tool returns {"error": ...}, tell the user that information is unavailable — \
+do not substitute your own estimate.
+5. Keep responses concise — the user is time-pressed. One sentence per leg is enough.
+6. Airspace restrictions, METAR conditions, and helipad operational status are handled \
+automatically inside compute_route. Never ask the user about them.
+7. For off-topic questions unrelated to travel, routing, weather, or nearby amenities, \
+politely redirect to your area of expertise."""
+
+TOOL_SCHEMAS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "geocode",
+            "description": (
+                "Convert a place name or address to geographic coordinates. "
+                "Call this first when you need the location of somewhere the user mentioned."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "address": {
+                        "type": "string",
+                        "description": "Place name or street address, e.g. '30th St Heliport' or '272 Park Ave, New York'",
+                    }
+                },
+                "required": ["address"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_nearby_places",
+            "description": (
+                "Search for restaurants, hotels, cafes, or other businesses near a location. "
+                "You MUST call this before naming any specific place."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "Location to search near, e.g. '30th St Heliport, NYC' or 'Westchester Airport'",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": (
+                            "Type of place. Use canonical terms for best results: "
+                            "'restaurant' (covers fine dining, bistro, etc.), 'hotel', "
+                            "'coffee', 'pharmacy', 'lounge', 'parking'. "
+                            "For cuisine-specific searches you may use: "
+                            "'sushi', 'italian', 'french', 'steakhouse', 'seafood'."
+                        ),
+                    },
+                    "radius_m": {
+                        "type": "integer",
+                        "description": "Search radius in metres (default 500, max 2000)",
+                    },
+                },
+                "required": ["location", "category"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": (
+                "Get current weather and forecast for any location. "
+                "You MUST call this before stating any weather conditions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City, address, or landmark, e.g. 'Greenwich CT' or '30th St Heliport NYC'",
+                    }
+                },
+                "required": ["location"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compute_route",
+            "description": (
+                "Compute a multimodal helicopter + ground route between two locations. "
+                "Returns travel time, legs breakdown, time saved vs driving, and any advisories. "
+                "You MUST call this before stating any travel times or route details."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "origin": {
+                        "type": "string",
+                        "description": "Starting location",
+                    },
+                    "destination": {
+                        "type": "string",
+                        "description": "Destination location",
+                    },
+                },
+                "required": ["origin", "destination"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "confirm_booking",
+            "description": (
+                "Confirm and book the helicopter + ground route. "
+                "Only call this when the user explicitly says 'book', 'yes', 'confirm', "
+                "'go ahead', 'book it', or similar AND a route has already been discussed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "origin": {
+                        "type": "string",
+                        "description": "Starting location (same as compute_route origin)",
+                    },
+                    "destination": {
+                        "type": "string",
+                        "description": "Destination location",
+                    },
+                },
+                "required": ["origin", "destination"],
+            },
+        },
+    },
+]
 
 # ── Groq client (lazy — avoids ImportError if package not installed) ──────────
 
@@ -380,9 +535,10 @@ def geocode_place(place_name: str) -> Optional[tuple[float, float]]:
     """Geocode a place name or address to (lat, lon).
 
     Pipeline:
-      1. Try TomTom (business names + addresses, best accuracy)
-      2. If TomTom fails, strip business name via LLM then retry TomTom
-      3. Fall back to Nominatim on the cleaned address
+      1. In-memory cache (session-scoped, avoids repeated HTTP for same place)
+      2. Try TomTom (business names + addresses, best accuracy)
+      3. If TomTom fails, strip business name via LLM then retry TomTom
+      4. Fall back to Nominatim on the cleaned address
 
     Args:
         place_name: Human-readable place name, business, or address.
@@ -390,9 +546,14 @@ def geocode_place(place_name: str) -> Optional[tuple[float, float]]:
     Returns:
         (lat, lon) tuple, or None if all sources fail.
     """
+    cache_key = place_name.lower().strip()
+    if cache_key in _geocode_cache:
+        return _geocode_cache[cache_key]
+
     # 1. Try TomTom directly
     result = _geocode_tomtom(place_name)
     if result:
+        _geocode_cache[cache_key] = result
         return result
 
     # 2. LLM-clean the address, retry TomTom (handles "Business at 32 Mercer St …")
@@ -401,10 +562,204 @@ def geocode_place(place_name: str) -> Optional[tuple[float, float]]:
         log.info("Geocode: cleaned '%s' → '%s'", place_name, cleaned)
         result = _geocode_tomtom(cleaned)
         if result:
+            _geocode_cache[cache_key] = result
             return result
 
     # 3. Nominatim fallback on cleaned address
-    return _geocode_nominatim(cleaned)
+    result = _geocode_nominatim(cleaned)
+    _geocode_cache[cache_key] = result  # cache None too (avoids re-trying dead locations)
+    return result
+
+
+# ── Level 1 tool implementations ──────────────────────────────────────────────
+
+import urllib.parse as _urlparse
+import datetime as _dt
+
+_nws_cache: dict = {}           # key: "lat2,lon2" → (result_dict, fetched_at)
+_NWS_TTL_S = 600                # 10-minute cache
+_nws_gridpoint_cache: dict = {} # key: "lat2,lon2" → forecast_url (permanent — gridpoints never move)
+_geocode_cache: dict = {}       # key: place_name.lower().strip() → (lat, lon) | None
+_poi_cache: dict = {}           # key: (location, category, radius_m) → result_dict
+
+# TomTom structured category codes — hard-filter results so keyword drift can't pull
+# in off-category businesses (e.g. liquor stores for "fine dining").
+# https://developer.tomtom.com/search-api/documentation/product-information/supported-categories
+_TOMTOM_CATEGORY_MAP: dict[str, int] = {
+    # dining
+    "restaurant": 7315,
+    "restaurants": 7315,
+    "dining": 7315,
+    "fine dining": 7315,
+    "dinner": 7315,
+    "lunch": 7315,
+    "food": 7315,
+    "eat": 7315,
+    "sushi": 7315025,
+    "italian": 7315003,
+    "french": 7315001,
+    "steakhouse": 7315002,
+    "seafood": 7315005,
+    "japanese": 7315034,
+    "american": 7315041,
+    "bar": 7315,
+    "bistro": 7315,
+    "brasserie": 7315,
+    # coffee
+    "coffee": 9361065,
+    "cafe": 9361065,
+    "cafes": 9361065,
+    "coffee shop": 9361065,
+    # accommodation
+    "hotel": 7314,
+    "hotels": 7314,
+    "motel": 7314,
+    # transport
+    "parking": 7013,
+    "gas station": 7311,
+    "fuel": 7311,
+    # health
+    "pharmacy": 9361,
+    "hospital": 7321,
+    # other
+    "lounge": 9913,
+    "atm": 7397001,
+}
+
+
+def _tool_search_places(location: str, category: str, radius_m: int = 500) -> dict:
+    """Search for POIs near a location using TomTom Search API.
+
+    Args:
+        location: Plain-English location name or address.
+        category: Type of place, e.g. 'restaurant', 'hotel', 'coffee'.
+        radius_m: Search radius in metres (clamped to 2000).
+
+    Returns:
+        Dict with 'results' list or 'error' key.
+    """
+    radius_m = min(int(radius_m), 2000)
+    poi_key = (location.lower().strip(), category.lower().strip(), radius_m)
+    if poi_key in _poi_cache:
+        return _poi_cache[poi_key]
+
+    coords = geocode_place(location)
+    if coords is None:
+        return {"error": f"Could not locate '{location}'", "results": []}
+    lat, lon = coords
+
+    key = os.getenv("TOMTOM_API_KEY", "")
+    if not key:
+        return {"error": "TomTom API key not configured", "results": []}
+
+    cat_lower = category.lower().strip()
+    category_code = _TOMTOM_CATEGORY_MAP.get(cat_lower)
+    url = (
+        f"https://api.tomtom.com/search/2/poiSearch/"
+        f"{_urlparse.quote(category)}.json"
+    )
+    params: dict = {"key": key, "lat": lat, "lon": lon,
+                    "radius": radius_m, "limit": 5}
+    if category_code:
+        params["categorySet"] = category_code
+    try:
+        resp = requests.get(url, params=params, timeout=8)
+        resp.raise_for_status()
+    except Exception as exc:
+        log.warning("TomTom POI search failed: %s", exc)
+        return {"error": "Place search temporarily unavailable", "results": []}
+
+    items = resp.json().get("results", [])
+    if not items:
+        out = {
+            "results": [],
+            "note": f"No {category} found within {radius_m}m of {location} — try a larger radius",
+        }
+        _poi_cache[poi_key] = out
+        return out
+
+    results = []
+    for item in items[:5]:
+        poi = item.get("poi", {})
+        addr = item.get("address", {})
+        results.append({
+            "name": poi.get("name", "Unknown"),
+            "address": addr.get("freeformAddress", ""),
+            "distance_m": round(item.get("dist", 0)),
+            "phone": poi.get("phone", ""),
+            "url": poi.get("url", ""),
+        })
+    out = {"location": location, "category": category, "results": results}
+    _poi_cache[poi_key] = out
+    return out
+
+
+def _tool_get_weather(location: str) -> dict:
+    """Get NWS Point Forecast for a location (CONUS only, no API key).
+
+    Args:
+        location: City, address, or landmark.
+
+    Returns:
+        Dict with conditions/temperature/wind/precip_chance or 'error' key.
+    """
+    coords = geocode_place(location)
+    if coords is None:
+        return {"error": f"Could not locate '{location}'"}
+    lat, lon = coords
+
+    # NWS only covers CONUS (approx lat 24–50, lon -66 to -125)
+    if not (24.0 <= lat <= 50.0 and -125.0 <= lon <= -66.0):
+        return {"error": "Weather data not available outside the continental US"}
+
+    cache_key = f"{lat:.2f},{lon:.2f}"
+    cached = _nws_cache.get(cache_key)
+    if cached:
+        data, fetched_at = cached
+        if (_dt.datetime.utcnow() - fetched_at).total_seconds() < _NWS_TTL_S:
+            return data
+
+    headers = {"User-Agent": "SkyRoute/1.0 (zivg@campus.technion.ac.il)"}
+    try:
+        # Step 1: resolve gridpoint (permanent cache — NWS grid cells never move)
+        forecast_url = _nws_gridpoint_cache.get(cache_key)
+        if forecast_url is None:
+            r1 = requests.get(
+                f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}",
+                headers=headers, timeout=8,
+            )
+            r1.raise_for_status()
+            forecast_url = r1.json()["properties"]["forecast"]
+            _nws_gridpoint_cache[cache_key] = forecast_url
+
+        # Step 2: fetch forecast (always fresh — expires after TTL)
+        r2 = requests.get(forecast_url, headers=headers, timeout=8)
+        r2.raise_for_status()
+        period = r2.json()["properties"]["periods"][0]
+    except Exception as exc:
+        log.warning("NWS weather fetch failed for %s: %s", location, exc)
+        return {"error": "NWS weather service unavailable — try again shortly"}
+
+    precip = 0
+    try:
+        precip = int(period.get("probabilityOfPrecipitation", {}).get("value") or 0)
+    except (TypeError, ValueError):
+        pass
+
+    temp_f = period.get("temperature", 0)
+    temp_c = round((temp_f - 32) * 5 / 9, 1)
+    result = {
+        "location": location,
+        "period": period.get("name", "Now"),
+        "conditions": period.get("shortForecast", ""),
+        "temperature_f": temp_f,
+        "temperature_c": temp_c,
+        "wind": f"{period.get('windSpeed', '')} {period.get('windDirection', '')}".strip(),
+        "precip_chance": precip,
+        "detailed": (period.get("detailedForecast", "") or "")[:250],
+    }
+    _nws_cache[cache_key] = (result, _dt.datetime.utcnow())
+    return result
 
 
 # ── TFR segment check ─────────────────────────────────────────────────────────
@@ -431,22 +786,85 @@ def _point_in_polygon(lat: float, lon: float, ring: list[list[float]]) -> bool:
 
 _HARD_TFR_CODES = {"NDA_TFR", "DEF", "SECURITY", "STADIUM"}
 
+
+def _aerial_departure_dt(route: dict) -> datetime:
+    """Best-effort UTC datetime when the helicopter segment begins.
+
+    Uses the route's pre-flight ground leg durations to offset from now.
+    If the user specified an arrival_time (HH:MM), back-computes from that
+    instead, treating the time as local Eastern (UTC-4 summer approximation)
+    since all routed helipads are in the NE US corridor.
+    """
+    now = datetime.now(timezone.utc)
+    legs = route.get("legs", [])
+
+    # Minutes of ground travel before the first helicopter leg
+    heli_idx = next((i for i, l in enumerate(legs) if l.get("mode") == "helicopter"), len(legs))
+    pre_flight_min = sum(legs[i].get("duration_min", 0) for i in range(heli_idx))
+
+    arr_str = route.get("arrival_time")  # "HH:MM" or None
+    if arr_str:
+        try:
+            h, m = map(int, arr_str.split(":"))
+            total_min = route.get("total_min", 0)
+            # User always types arrival time in US Eastern (the app's operating timezone).
+            # Use zoneinfo so DST (EDT/EST) is handled automatically — works identically
+            # whether Streamlit is running locally or on Streamlit Cloud (UTC server).
+            from zoneinfo import ZoneInfo
+            eastern = ZoneInfo("America/New_York")
+            today_et = now.astimezone(eastern).date()
+            arrival_et = datetime(today_et.year, today_et.month, today_et.day,
+                                  h, m, tzinfo=eastern)
+            if arrival_et.astimezone(timezone.utc) < now:
+                arrival_et += timedelta(days=1)
+            arrival_utc = arrival_et.astimezone(timezone.utc)
+            aerial_start = arrival_utc - timedelta(minutes=total_min - pre_flight_min)
+            return aerial_start
+        except Exception:
+            pass
+
+    return now + timedelta(minutes=pre_flight_min)
+
+
+def _tfr_active_at(tfr: dict, dt: datetime) -> bool:
+    """Return True if the TFR is active (or has unknown timing) at *dt* (UTC).
+
+    A TFR is considered inactive only when we have a confirmed expiry time
+    that is strictly before *dt*.  If no time data is available, we treat the
+    TFR as active (conservative — the FAA GeoServer already pre-filters to
+    current/upcoming TFRs).
+    """
+    expires = tfr.get("expires_utc")
+    effective = tfr.get("effective_utc")
+
+    # Already expired
+    if expires and dt > expires:
+        return False
+    # Not yet effective (don't warn about TFRs > 6 hours in the future)
+    if effective and (effective - dt).total_seconds() > 6 * 3600:
+        return False
+    return True
+
+
 def _check_tfrs_on_segment(
     lat1: float, lon1: float,
     lat2: float, lon2: float,
+    departure_dt: Optional[datetime] = None,
     n_samples: int = 7,
 ) -> tuple[list[dict], list[dict]]:
-    """Check whether the aerial segment intersects any active TFRs.
+    """Check whether the aerial segment intersects any time-active TFRs.
 
     Samples n_samples evenly-spaced points along the great-circle segment and
-    tests each against all active TFR polygons.  Stadium TFRs use a 3 nm
-    (5.6 km) radius check instead of polygon containment.
+    tests each against TFR polygons that are active at *departure_dt*.
+    Stadium TFRs use a 3 nm (5.6 km) radius check instead of polygon containment.
 
     Args:
         lat1: Departure helipad latitude.
         lon1: Departure helipad longitude.
         lat2: Arrival helipad latitude.
         lon2: Arrival helipad longitude.
+        departure_dt: UTC datetime when the helicopter segment starts.
+                      Defaults to now if not supplied.
         n_samples: Number of points to test along the segment.
 
     Returns:
@@ -465,6 +883,8 @@ def _check_tfrs_on_segment(
         log.warning("TFR fetch failed during route check: %s", exc)
         return [], []
 
+    check_dt = departure_dt or datetime.now(timezone.utc)
+
     sample_pts = [
         (lat1 + (lat2 - lat1) * i / (n_samples - 1),
          lon1 + (lon2 - lon1) * i / (n_samples - 1))
@@ -479,6 +899,12 @@ def _check_tfrs_on_segment(
         nid = tfr.get("notam_id", "")
         if nid in seen:
             continue
+
+        # Skip TFRs that are not active at the estimated departure time
+        if not _tfr_active_at(tfr, check_dt):
+            log.debug("TFR %s skipped — not active at %s", nid, check_dt.isoformat())
+            continue
+
         geo_type = tfr.get("geometry_type", "")
         coords = tfr.get("coordinates", [])
         hit = False
@@ -504,6 +930,198 @@ def _check_tfrs_on_segment(
                 soft.append(tfr)
 
     return hard, soft
+
+
+# ── Tool dispatcher (run_agent_v2) ────────────────────────────────────────────
+
+def _execute_tool(
+    name: str,
+    args: dict,
+    helipads: list[dict],
+    faa_adip_df,
+    result: dict,
+    progress_callback=None,
+) -> dict:
+    """Execute one tool call and return a JSON-serializable result dict.
+
+    Side-effects:
+        - 'compute_route' and 'confirm_booking' mutate *result* in-place so
+          app.py's existing route/booking display logic triggers unchanged.
+
+    Args:
+        name: Tool function name.
+        args: Parsed arguments dict from the model's tool_call.
+        helipads: Available helipads list (from app.py load_data).
+        faa_adip_df: FAA ADIP DataFrame or None (for booking lookup).
+        result: Shared result dict mutated by compute_route / confirm_booking.
+
+    Returns:
+        JSON-serializable dict passed back to the model as a tool_result.
+    """
+    try:
+        if name == "geocode":
+            address = args.get("address", "")
+            coords = geocode_place(address)
+            if coords is None:
+                return {"error": f"Could not locate '{address}'"}
+            # Try to get a display name via TomTom
+            key = os.getenv("TOMTOM_API_KEY", "")
+            display = address
+            if key:
+                try:
+                    r = requests.get(
+                        f"https://api.tomtom.com/search/2/search/{_urlparse.quote(address)}.json",
+                        params={"key": key, "limit": 1, "countrySet": "US"},
+                        timeout=6,
+                    )
+                    if r.ok:
+                        items = r.json().get("results", [])
+                        if items:
+                            display = items[0].get("address", {}).get("freeformAddress", address)
+                except Exception:
+                    pass
+            return {"lat": coords[0], "lon": coords[1], "display_name": display}
+
+        if name == "search_nearby_places":
+            return _tool_search_places(
+                location=args.get("location", ""),
+                category=args.get("category", ""),
+                radius_m=int(args.get("radius_m", 500)),
+            )
+
+        if name == "get_weather":
+            return _tool_get_weather(location=args.get("location", ""))
+
+        if name in ("compute_route", "confirm_booking"):
+            origin_text = args.get("origin", "")
+            dest_text   = args.get("destination", "")
+
+            # Geocode both ends
+            origin_ll = geocode_place(origin_text)
+            dest_ll   = geocode_place(dest_text)
+            if origin_ll is None:
+                return {"error": f"Could not locate origin '{origin_text}'"}
+            if dest_ll is None:
+                return {"error": f"Could not locate destination '{dest_text}'"}
+
+            if not helipads:
+                return {"error": "No helipad data available — data files may not be loaded"}
+
+            # For confirm_booking: reuse already-computed route if available
+            if name == "confirm_booking" and result.get("route"):
+                route = result["route"]
+                # Inject real place names in case they were missing on the cached route
+                if result.get("origin", {}).get("text"):
+                    route = {**route, "origin_name": result["origin"]["text"]}
+                if result.get("destination", {}).get("text"):
+                    route = {**route, "dest_name": result["destination"]["text"]}
+            else:
+                route = compute_skyroute(
+                    origin_ll[0], origin_ll[1],
+                    dest_ll[0], dest_ll[1],
+                    helipads,
+                    origin_name=origin_text,
+                    dest_name=dest_text,
+                )
+                result["route"] = route   # triggers app.py route display
+                # Store geocoded endpoints so app.py map display can read them
+                result["origin"]      = {"text": origin_text, "lat": origin_ll[0], "lon": origin_ll[1]}
+                result["destination"] = {"text": dest_text,   "lat": dest_ll[0],   "lon": dest_ll[1]}
+
+            # TFR + weather advisory
+            advisory_parts = []
+            pad_a = route.get("nearest_pad_origin")
+            pad_b = route.get("nearest_pad_dest")
+            departure_dt = _aerial_departure_dt(route)
+            if pad_a and pad_b:
+                hard, soft = _check_tfrs_on_segment(
+                    float(pad_a["lat"]), float(pad_a["lon"]),
+                    float(pad_b["lat"]), float(pad_b["lon"]),
+                    departure_dt=departure_dt,
+                )
+                dep_label = departure_dt.strftime("%H:%MZ")
+                if hard:
+                    names = "; ".join(t.get("text", "TFR") for t in hard[:2])
+                    result["tfr_warnings"] = [t.get("text", "TFR") for t in hard + soft]
+                    advisory_parts.append(
+                        f"AIRSPACE CLOSURE at {dep_label}: {names}"
+                    )
+                elif soft:
+                    result["tfr_warnings"] = [t.get("text", "TFR") for t in soft]
+                    advisory_parts.append(
+                        f"TFR advisory at {dep_label} — check tfr.faa.gov"
+                    )
+                else:
+                    result["tfr_warnings"] = []
+            else:
+                result["tfr_warnings"] = []
+            result["tfrs_ignored"] = False
+
+            # Precipitation check on route waypoints
+            try:
+                from src.weather import check_route_precipitation
+                waypoints = []
+                for leg in route.get("legs", []):
+                    if leg.get("mode") == "helicopter" and pad_a and pad_b:
+                        waypoints = [
+                            {"lat": float(pad_a["lat"]), "lon": float(pad_a["lon"]), "label": "departure pad"},
+                            {"lat": float(pad_b["lat"]), "lon": float(pad_b["lon"]), "label": "arrival pad"},
+                        ]
+                        break
+                if waypoints:
+                    precip_checks = check_route_precipitation(waypoints)
+                    severe  = [c for c in precip_checks if c.get("severity") == "avoid"]
+                    warned  = [c for c in precip_checks if c.get("severity") in ("warn", "avoid")]
+                    if severe:
+                        advisory_parts.append("Severe precipitation on aerial leg — helicopter not recommended")
+                    if warned:
+                        result["precip_warnings"] = [
+                            f"{c['label'].title()}: precipitation intensity {c['intensity']}/255"
+                            for c in warned
+                        ]
+            except Exception:
+                pass
+
+            advisory = " | ".join(advisory_parts) if advisory_parts else None
+
+            if name == "compute_route":
+                return {
+                    "total_min": route["total_min"],
+                    "drive_only_min": route["drive_only_min"],
+                    "time_saved_min": route["time_saved_min"],
+                    "legs": route["legs"],
+                    "aerial_ok": not bool(advisory_parts),
+                    "advisory": advisory,
+                }
+
+            # confirm_booking path
+            booking_legs = run_booking(route, faa_adip_df=faa_adip_df,
+                                       progress_callback=progress_callback)
+            result["booking_legs"] = booking_legs   # triggers app.py booking display
+
+            # Build a booking reference from the first rideshare leg
+            booking_ref = "SKY-CONFIRMED"
+            for bl in booking_legs:
+                rs = bl.get("rideshare", {})
+                if rs.get("booking_ref"):
+                    booking_ref = rs["booking_ref"]
+                    break
+
+            return {
+                "confirmation_id": booking_ref,
+                "legs": len(booking_legs),
+                "summary": (
+                    f"Booked {len(booking_legs)}-leg route: "
+                    f"{origin_text} → {dest_text}. "
+                    f"Reference: {booking_ref}."
+                ),
+            }
+
+        return {"error": f"Unknown tool: {name}"}
+
+    except Exception as exc:
+        log.warning("Tool execution error (%s): %s", name, exc)
+        return {"error": f"Tool {name} failed: {exc}"}
 
 
 # ── Step 3: Python routing engine ─────────────────────────────────────────────
@@ -553,6 +1171,8 @@ def compute_skyroute(
     dest_lon: float,
     helipads: list[dict],
     arrival_time: Optional[str] = None,
+    origin_name: str = "Origin",
+    dest_name: str = "Destination",
 ) -> dict:
     """Compute the optimal multimodal route between two coordinates.
 
@@ -620,7 +1240,7 @@ def compute_skyroute(
     if pad_a and d_to_a > 0:
         legs.append({
             "mode": mode_to_a,
-            "from": "Origin",
+            "from": origin_name,
             "to": pad_a.get("name") or pad_a.get("ident") or "Departure Helipad",
             "dist_km": round(d_to_a, 1),
             "duration_min": round(t_to_a),
@@ -637,7 +1257,7 @@ def compute_skyroute(
         legs.append({
             "mode": mode_from_b,
             "from": pad_b.get("name") or pad_b.get("ident") or "Arrival Helipad",
-            "to": "Destination",
+            "to": dest_name,
             "dist_km": round(d_from_b, 1),
             "duration_min": round(t_from_b),
         })
@@ -653,6 +1273,8 @@ def compute_skyroute(
         "nearest_pad_dest": pad_b,
         "origin": {"lat": origin_lat, "lon": origin_lon},
         "dest": {"lat": dest_lat, "lon": dest_lon},
+        "origin_name": origin_name,
+        "dest_name": dest_name,
     }
 
 
@@ -859,6 +1481,178 @@ def run_agent(
 
     # Step 4 — Format narrative
     result["response"] = format_skyroute_response(route, user_text)
+
+    return result
+
+
+# ── Level 1 agentic loop ──────────────────────────────────────────────────────
+
+def run_agent_v2(
+    user_text: str,
+    helipads: list[dict],
+    history: list[dict] | None = None,
+    faa_adip_df=None,
+    status_callback=None,
+) -> dict:
+    """Tool-calling concierge: natural language → tool dispatch → response.
+
+    The model autonomously decides which tools to call (search_nearby_places,
+    get_weather, compute_route, confirm_booking, geocode) based on the user's
+    intent.  All routing math, TFR checks, and booking flows remain in Python;
+    the LLM orchestrates the sequence and formats the final answer.
+
+    Args:
+        user_text: Free-form user message.
+        helipads: Available helipads list (lat, lon, name, ident).
+        history: Prior conversation messages for multi-turn context.
+                 Each dict must have 'role' and 'content' keys.
+                 Tool-call turns from previous rounds are included automatically.
+        faa_adip_df: FAA ADIP DataFrame for helipad booking lookup (or None).
+        status_callback: Optional callable(event, data) for live UI progress.
+            Called with event in {"thinking", "tool_call", "tool_result"}.
+            data keys: iteration (thinking), name+args (tool_call), name+result (tool_result).
+
+    Returns:
+        Dict with keys:
+          response (str | None): final model text shown in chat
+          route (dict | None): compute_skyroute() output if routing was triggered
+          booking_legs (list | None): run_booking() output if booking was triggered
+          error (str | None): user-friendly error message
+          tfr_warnings (list[str]): TFR advisory strings
+          tfrs_ignored (bool): True if hard TFRs were overridden
+          _messages (list[dict]): full conversation messages for next-turn history
+    """
+    result: dict = {
+        "response": None,
+        "route": None,
+        "booking_legs": None,
+        "error": None,
+        "tfr_warnings": [],
+        "tfrs_ignored": False,
+        "precip_warnings": [],
+        "_messages": [],
+    }
+
+    client = _get_groq_client()
+    if client is None:
+        result["error"] = (
+            "Route Assistant is not configured — add GROQ_API_KEY to .env "
+            "(local) or Streamlit Cloud Secrets."
+        )
+        return result
+
+    # Build messages: system + trimmed history + current user turn
+    messages: list[dict] = [{"role": "system", "content": _CONCIERGE_SYSTEM}]
+    if history:
+        messages.extend(history[-10:])
+    messages.append({"role": "user", "content": user_text})
+
+    max_iterations = 8
+    active_model = _GROQ_MODEL_70B
+
+    for iteration in range(max_iterations):
+        if status_callback:
+            status_callback("thinking", {"iteration": iteration})
+        try:
+            resp = client.chat.completions.create(
+                model=active_model,
+                messages=messages,
+                tools=TOOL_SCHEMAS,
+                tool_choice="auto",
+                temperature=0,
+            )
+        except Exception as exc:
+            err_str = str(exc).lower()
+            # 70b may not be enabled in the Groq project — fall back silently
+            if active_model == _GROQ_MODEL_70B and (
+                "model_not_found" in err_str
+                or "rate_limit" in err_str
+                or "not found" in err_str
+                or "does not exist" in err_str
+                or "blocked" in err_str
+                or "permission" in err_str
+                or "403" in err_str
+            ):
+                log.warning(
+                    "llama-3.3-70b-versatile unavailable — falling back to %s. "
+                    "Enable it at console.groq.com/settings/project/limits.",
+                    _GROQ_MODEL,
+                )
+                active_model = _GROQ_MODEL
+                try:
+                    resp = client.chat.completions.create(
+                        model=active_model,
+                        messages=messages,
+                        tools=TOOL_SCHEMAS,
+                        tool_choice="auto",
+                        temperature=0,
+                    )
+                except Exception as exc2:
+                    log.error("Groq fallback also failed: %s", exc2)
+                    result["error"] = "Route Assistant is temporarily unavailable."
+                    return result
+            else:
+                log.error("Groq API error (iteration %d): %s", iteration, exc)
+                result["error"] = "Route Assistant is temporarily unavailable."
+                return result
+
+        msg = resp.choices[0].message
+
+        if not msg.tool_calls:
+            # Model returned a final text response — done
+            result["response"] = (msg.content or "").strip()
+            messages.append({"role": "assistant", "content": result["response"]})
+            break
+
+        # Append the assistant's tool-call message
+        assistant_msg: dict = {"role": "assistant", "content": msg.content or ""}
+        # Groq returns tool_calls as objects; serialise for the messages list
+        assistant_msg["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            for tc in msg.tool_calls
+        ]
+        messages.append(assistant_msg)
+
+        # Execute each tool and append results
+        for tc in msg.tool_calls:
+            try:
+                tool_args = json.loads(tc.function.arguments)
+            except Exception:
+                tool_args = {}
+
+            if status_callback:
+                status_callback("tool_call", {"name": tc.function.name, "args": tool_args})
+
+            tool_result = _execute_tool(
+                name=tc.function.name,
+                args=tool_args,
+                helipads=helipads,
+                faa_adip_df=faa_adip_df,
+                result=result,
+                progress_callback=status_callback,
+            )
+
+            if status_callback:
+                status_callback("tool_result", {"name": tc.function.name, "result": tool_result})
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": json.dumps(tool_result),
+            })
+    else:
+        log.warning("run_agent_v2 hit max_iterations (%d) without final response", max_iterations)
+        result["error"] = "Took too many steps — please rephrase your request."
+
+    # Store the full conversation (minus system prompt) for next-turn history
+    result["_messages"] = messages[1:]   # strip system message
 
     return result
 
@@ -1141,43 +1935,88 @@ def simulate_rideshare(origin_lat: float, origin_lon: float,
     }
 
 
-def run_booking(route: dict, faa_adip_df=None) -> list[dict]:
+def run_booking(route: dict, faa_adip_df=None, progress_callback=None) -> list[dict]:
     """Build a per-leg booking plan for a computed route.
 
     Drive legs → rideshare simulation (Uber / Waymo).
     Helicopter legs → helipad coordination info (ADIP + Mapillary).
 
+    HTTP calls within each leg are parallelised using ThreadPoolExecutor:
+    ADIP lookups and Mapillary ID fetches run concurrently (phase 1), then
+    Mapillary thumbnail fetches run concurrently (phase 2). This reduces
+    a typical 3-leg route from ~28 serial calls to 2 parallel batches.
+
     Args:
         route: Output of compute_skyroute().
         faa_adip_df: Optional FAA ADIP enriched DataFrame for contact lookup.
+        progress_callback: Optional callable(event, data) for live UI updates.
 
     Returns:
         List of booking dicts, one per leg.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _emit(msg: str) -> None:
+        if progress_callback:
+            progress_callback("booking_step", {"msg": msg})
+
     booking_legs: list[dict] = []
     legs = route.get("legs", [])
+    n_legs = len(legs)
+    _emit(f"Processing {n_legs}-leg route…")
 
     for i, leg in enumerate(legs):
         if leg["mode"] == "helicopter":
             pad_a = route.get("nearest_pad_origin", {})
             pad_b = route.get("nearest_pad_dest", {})
+            dep_label = pad_a.get("name") or pad_a.get("ident") or "departure helipad"
+            arr_label = pad_b.get("name") or pad_b.get("ident") or "arrival helipad"
 
-            dep_info = lookup_helipad_info(
-                ident=pad_a.get("ident"), name=pad_a.get("name"),
-                lat=pad_a["lat"], lon=pad_a["lon"],
-                faa_adip_df=faa_adip_df,
-            )
-            arr_info = lookup_helipad_info(
-                ident=pad_b.get("ident"), name=pad_b.get("name"),
-                lat=pad_b["lat"], lon=pad_b["lon"],
-                faa_adip_df=faa_adip_df,
-            )
-            dep_info["mly_image_id"] = find_nearest_mapillary_image(
-                pad_a["lat"], pad_a["lon"]) or ""
-            dep_info["mly_thumb_url"] = get_mapillary_thumb_url(dep_info["mly_image_id"]) or ""
-            arr_info["mly_image_id"] = find_nearest_mapillary_image(
-                pad_b["lat"], pad_b["lon"]) or ""
-            arr_info["mly_thumb_url"] = get_mapillary_thumb_url(arr_info["mly_image_id"]) or ""
+            _emit(f"🚁 Leg {i+1}/{n_legs} — helicopter · {leg['from']} → {leg['to']}")
+            _emit(f"   ↳ Fetching helipad status + imagery ({dep_label} & {arr_label})…")
+
+            # Phase 1: ADIP lookups + Mapillary ID fetches + METAR — all independent, run in parallel
+            from src.notam import fetch_metar as _fetch_metar
+            _dep_ident = pad_a.get("ident") or pad_a.get("IDENT") or ""
+            _arr_ident = pad_b.get("ident") or pad_b.get("IDENT") or ""
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                f_dep        = ex.submit(lookup_helipad_info,
+                                         pad_a.get("ident"), pad_a.get("name"),
+                                         pad_a["lat"], pad_a["lon"], faa_adip_df)
+                f_arr        = ex.submit(lookup_helipad_info,
+                                         pad_b.get("ident"), pad_b.get("name"),
+                                         pad_b["lat"], pad_b["lon"], faa_adip_df)
+                f_mly_a      = ex.submit(find_nearest_mapillary_image, pad_a["lat"], pad_a["lon"])
+                f_mly_b      = ex.submit(find_nearest_mapillary_image, pad_b["lat"], pad_b["lon"])
+                f_metar_dep  = ex.submit(_fetch_metar, _dep_ident) if _dep_ident else None
+                f_metar_arr  = ex.submit(_fetch_metar, _arr_ident) if _arr_ident else None
+
+            dep_info  = f_dep.result()
+            arr_info  = f_arr.result()
+            mly_a_id  = f_mly_a.result() or ""
+            mly_b_id  = f_mly_b.result() or ""
+            metar_dep = f_metar_dep.result() if f_metar_dep else None
+            metar_arr = f_metar_arr.result() if f_metar_arr else None
+
+            dep_status = dep_info.get("status") or "unknown"
+            arr_status = arr_info.get("status") or "unknown"
+            dep_coord  = dep_info.get("coordination_note") or dep_info.get("contact") or ""
+            arr_coord  = arr_info.get("coordination_note") or arr_info.get("contact") or ""
+            _emit(f"   ↳ {dep_label}: {dep_status}" + (f" · {dep_coord[:60]}" if dep_coord else ""))
+            _emit(f"   ↳ {arr_label}: {arr_status}" + (f" · {arr_coord[:60]}" if arr_coord else ""))
+            _emit(f"   ↳ Fetching street-level imagery…")
+
+            # Phase 2: Mapillary thumbnails — run in parallel
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f_ta = ex.submit(get_mapillary_thumb_url, mly_a_id)
+                f_tb = ex.submit(get_mapillary_thumb_url, mly_b_id)
+
+            dep_info["mly_image_id"]  = mly_a_id
+            dep_info["mly_thumb_url"] = f_ta.result() or ""
+            arr_info["mly_image_id"]  = mly_b_id
+            arr_info["mly_thumb_url"] = f_tb.result() or ""
+            _emit(f"   ↳ Imagery ready · leg {i+1} confirmed ✓")
+
             booking_legs.append({
                 "leg_index": i,
                 "mode": "helicopter",
@@ -1187,6 +2026,8 @@ def run_booking(route: dict, faa_adip_df=None) -> list[dict]:
                 "dist_km": leg["dist_km"],
                 "departure_helipad": dep_info,
                 "arrival_helipad": arr_info,
+                "metar_dep": metar_dep,
+                "metar_arr": metar_arr,
             })
 
         elif leg["mode"] in ("drive", "walk"):
@@ -1195,20 +2036,40 @@ def run_booking(route: dict, faa_adip_df=None) -> list[dict]:
                 o = route["origin"]
                 pickup_lat, pickup_lon = o["lat"], o["lon"]
                 dropoff_lat, dropoff_lon = pad["lat"], pad["lon"]
-                from_name, to_name = "Your origin", pad.get("name", leg["to"])
+                _origin_label = route.get("origin_name") or "Your origin"
+                from_name = f"Origin: {_origin_label}"
+                to_name   = pad.get("name") or pad.get("ident") or leg["to"]
             else:
                 pad = route.get("nearest_pad_dest", {})
                 d = route["dest"]
                 pickup_lat, pickup_lon = pad["lat"], pad["lon"]
                 dropoff_lat, dropoff_lon = d["lat"], d["lon"]
-                from_name, to_name = pad.get("name", leg["from"]), "Your destination"
+                from_name = pad.get("name") or pad.get("ident") or leg["from"]
+                _dest_label = route.get("dest_name") or "Your destination"
+                to_name   = f"Destination: {_dest_label}"
+
+            _mode_icon = "🚶" if leg["mode"] == "walk" else "🚗"
+            _emit(f"{_mode_icon} Leg {i+1}/{n_legs} — {leg['mode']} · {leg['from']} → {leg['to']}")
+            _emit(f"   ↳ {leg['dist_km']} km · ~{leg['duration_min']} min · fetching imagery…")
 
             _pu_embed, _pu_url = _mapillary_embed(pickup_lat, pickup_lon)
             _do_embed, _do_url = _mapillary_embed(dropoff_lat, dropoff_lon)
-            _pu_mly_id = find_nearest_mapillary_image(pickup_lat, pickup_lon) or ""
-            _pu_mly_thumb = get_mapillary_thumb_url(_pu_mly_id) or ""
-            _do_mly_id = find_nearest_mapillary_image(dropoff_lat, dropoff_lon) or ""
-            _do_mly_thumb = get_mapillary_thumb_url(_do_mly_id) or ""
+
+            # Phase 1: Mapillary ID lookups in parallel
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f_pu_id = ex.submit(find_nearest_mapillary_image, pickup_lat, pickup_lon)
+                f_do_id = ex.submit(find_nearest_mapillary_image, dropoff_lat, dropoff_lon)
+
+            _pu_mly_id = f_pu_id.result() or ""
+            _do_mly_id = f_do_id.result() or ""
+
+            # Phase 2: Mapillary thumbnails in parallel
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f_pu_th = ex.submit(get_mapillary_thumb_url, _pu_mly_id)
+                f_do_th = ex.submit(get_mapillary_thumb_url, _do_mly_id)
+
+            _pu_mly_thumb = f_pu_th.result() or ""
+            _do_mly_thumb = f_do_th.result() or ""
 
             if leg["mode"] == "walk":
                 booking_legs.append({
@@ -1224,6 +2085,7 @@ def run_booking(route: dict, faa_adip_df=None) -> list[dict]:
                     "pickup_mly_id": _pu_mly_id,
                     "pickup_mly_thumb": _pu_mly_thumb,
                 })
+                _emit(f"   ↳ Walk {leg['dist_km']} km · leg {i+1} confirmed ✓")
             else:
                 rideshare = simulate_rideshare(pickup_lat, pickup_lon, dropoff_lat, dropoff_lon)
                 booking_legs.append({
@@ -1243,5 +2105,7 @@ def run_booking(route: dict, faa_adip_df=None) -> list[dict]:
                     "dropoff_mly_thumb": _do_mly_thumb,
                     "rideshare": rideshare,
                 })
+                _emit(f"   ↳ Rideshare: {rideshare['fare_range']} · {rideshare['duration_min']} min · leg {i+1} confirmed ✓")
 
+    _emit(f"All {n_legs} legs confirmed — booking reference ready")
     return booking_legs

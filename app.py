@@ -70,7 +70,7 @@ from src.weather import (
     get_nws_wms_kwargs,
     PRECIP_THRESHOLDS,
 )
-from src.agent import run_agent, run_booking, is_booking_intent
+from src.agent import run_agent, run_agent_v2, run_booking, is_booking_intent
 
 log = logging.getLogger(__name__)
 
@@ -349,6 +349,22 @@ def compute_threshold_curve(faa_df: pd.DataFrame,
                              osm_df: pd.DataFrame) -> pd.DataFrame:
     """Match rate vs distance threshold (cached separately — expensive)."""
     return match_rate_by_threshold(faa_df, osm_df)
+
+
+@st.cache_data
+def _load_osm_validated() -> pd.DataFrame | None:
+    """Load osm_validated.csv produced by scripts/validate_osm_only.py."""
+    path = DATA_DIR / "osm_validated.csv"
+    if not path.exists():
+        return None
+    df = pd.read_csv(path)
+    for col in ("lat", "lon", "hie_confidence", "hie_offset_m"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["hie_visual_detected"] = df["hie_visual_detected"].astype(bool)
+    df["osm_id"] = df["osm_id"].astype(str)
+    df["name"] = df["name"].fillna("").astype(str)
+    return df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
 
 @st.cache_data(ttl=3_600)
@@ -722,7 +738,7 @@ with tab_problem:
     st.markdown("#### 🤖 ML Pipeline: Helipad Intelligence Engine (HIE)")
     st.caption(
         "Raw helipad registries (FAA, OSM) are incomplete, stale, and contain military or "
-        "decommissioned pads. HIE is a 3-phase ML pipeline that validates every candidate "
+        "decommissioned pads. HIE is a 3-phase pipeline that validates every candidate "
         "pad before it enters the routing engine."
     )
 
@@ -742,12 +758,12 @@ with tab_problem:
   <div style="color:#475569;font-size:18px">→</div>
   <div style="background:#0d2137;border:2px solid #60a5fa;border-radius:8px;
               padding:10px 14px;color:#93c5fd;min-width:130px;text-align:center">
-    🧠 <b>Phase 2</b><br><span style="font-size:10px">LLM text search<br>Status check</span>
+    🛰️ <b>Phase 2</b><br><span style="font-size:10px">YOLO OSM<br>Validation</span>
   </div>
   <div style="color:#475569;font-size:18px">→</div>
   <div style="background:#0d2137;border:2px solid #34d399;border-radius:8px;
               padding:10px 14px;color:#6ee7b7;min-width:130px;text-align:center">
-    📋 <b>Phase 3 ⭐</b><br><span style="font-size:10px">ADIP arrival<br>coordination</span>
+    📋 <b>Phase 3</b><br><span style="font-size:10px">ADIP booking<br>enrichment</span>
   </div>
   <div style="color:#475569;font-size:18px">→</div>
   <div style="background:#071a2e;border:2px solid #22c55e;border-radius:8px;
@@ -822,43 +838,43 @@ the H marking at 3–4 px height (sufficient for fine-tuned YOLO).
     ph2_col, ph2_ex = st.columns([3, 2])
     with ph2_col:
         st.markdown("""
-**Phase 2 — Text/LLM Status Validation (OSM-only pads)**
+**Phase 2 — YOLO Visual Validation (OSM-only pads)**
 
-OSM pads that have no FAA match are the highest-value but highest-risk additions to
-the routing network. Phase 2 uses the **OSM name tag + coordinates** as a query to
-an LLM with web-search access (Google Gemini / GPT-4o) to verify operational status.
+OSM records with no FAA counterpart are the highest-value but highest-risk additions
+to the routing network. Phase 2 runs the same **YOLO11m cascade** on a fresh NAIP chip
+for each OSM-only pad to visually confirm the helipad exists before routing uses it.
+Military and private-use pads are excluded via **FAA ADIP structured flags** (`MIL_CODE`,
+`PRIVATEUSE`) — no LLM web search required.
 
 | | |
 |---|---|
-| **Input** | OSM pad name, coordinates, optional `operator` / `access` tags |
-| **Query** | *"Is [name] helipad at [location] currently operational? Military or civilian?"* |
-| **Model** | LLM + live web search (Gemini Search Grounding / Bing) |
-| **Output** | `operational` · `military` · `closed` · `uncertain` |
-| **Action — operational** | Pad promoted to routing pool ✅ |
-| **Action — military / closed** | Pad excluded; tagged with reason 🚫 |
-| **Action — uncertain** | Held for YOLO11m visual re-check 🔄 |
-| **Metric (M3 KPI)** | Classification accuracy on a hand-labelled held-out set |
+| **Input** | OSM coordinates → USDA NAIP 100 m × 100 m chip |
+| **Model** | YOLO11m fine-tuned (same as Phase 1) |
+| **Output** | `detected` · `confidence` · `hie_offset_m` |
+| **Action — detected** | Pad promoted to routing pool ✅ |
+| **Action — not detected** | Pad retained on map but excluded from routing 🚫 |
+| **Military / private** | Excluded via ADIP `MIL_CODE` / `PRIVATEUSE` fields |
+| **Result (NE US)** | **1,174 / 1,663** OSM-only pads confirmed (70.6 %) |
 """)
     with ph2_ex:
         st.markdown("""
 <div style="background:#0a1628;border:1px solid #ef4444;border-radius:8px;padding:12px 14px;font-size:12px">
-<div style="color:#f87171;font-weight:700;margin-bottom:8px">🚫 LLM verdict — military pad excluded</div>
+<div style="color:#f87171;font-weight:700;margin-bottom:8px">🚫 ADIP flag — military pad excluded</div>
 <div style="background:#1a0a0a;border-radius:6px;padding:8px;margin-bottom:8px;font-family:monospace;font-size:11px;color:#e2e8f0">
 <span style="color:#fbbf24">OSM pad</span>: Caven Point USAR Center Heliport<br>
-<span style="color:#94a3b8">FAA IDENT</span>: NJ77 (OSM faa-tag match)<br>
+<span style="color:#94a3b8">FAA IDENT</span>: NJ77<br>
 <span style="color:#94a3b8">Location</span>: Jersey City, NJ<br><br>
-<span style="color:#60a5fa">Query →</span> Gemini Search Grounding<br>
-<span style="color:#e2e8f0">"Is Caven Point USAR Heliport<br>
- operational and open to civil use?"</span><br><br>
-<span style="color:#f87171">Result</span>: <b style="color:#ef4444">MILITARY</b><br>
+<span style="color:#60a5fa">ADIP lookup →</span><br>
+<span style="color:#e2e8f0">MIL_CODE: <b style="color:#ef4444">ARMY</b><br>
+PRIVATEUSE: <b style="color:#ef4444">Y</b></span><br><br>
+<span style="color:#f87171">Result</span>: <b style="color:#ef4444">EXCLUDED</b><br>
 <span style="color:#94a3b8;font-size:10px">U.S. Army Reserve Center · private-use<br>
 New York District Corps of Engineers<br>
 → civilian routing: EXCLUDED 🚫</span>
 </div>
 <div style="color:#64748b;font-size:10px">
-Without LLM validation, this pad would be offered as a
-landing option to civilian passengers — a safety and
-regulatory violation.
+Military and private-use flags are read directly from FAA
+ADIP structured fields — no inference needed.
 </div>
 </div>
 """, unsafe_allow_html=True)
@@ -867,36 +883,35 @@ regulatory violation.
 
     # ── Phase 3 ─────────────────────────────────────────────────────────────────
     st.markdown("""
-**Phase 3 — ADIP-Guided Arrival Coordination ⭐ Stretch Goal (M3+)**
+**Phase 3 — ADIP Booking Enrichment**
 
-The FAA ADIP (Airport/Facility Directory Information Program) per-heliport record contains
-operational data that goes far beyond the basic registry: TLOF/FATO dimensions, touchdown
-bearing, ingress/egress corridors, ATC contacts, and inspection date. Phase 3 ingests this
-data to upgrade routing from *"navigate to coordinates"* to *"arrive on the correct approach
-bearing and clear the obstacle surface."*
+Every helicopter leg booking reads the FAA ADIP per-heliport record at runtime to surface
+operational details passengers need before they land: pad status, ownership type, military
+or private-use flags, inspection age, METAR flight category, and coordination instructions.
+Cryptic FAA remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) are decoded to plain
+English by the LLM before display — so passengers see actionable arrival notes, not raw
+FAA notation.
 """)
 
     adip1, adip2, adip3 = st.columns(3)
     adip1.markdown("""
 <div style="background:#0a1628;border:1px solid #34d399;border-radius:8px;padding:10px 12px;font-size:12px">
-<div style="color:#34d399;font-weight:700;margin-bottom:6px">📐 TLOF / FATO Dimensions</div>
-<div style="color:#94a3b8">Touchdown & Lift-Off zone size + Final Approach and Take-Off surface bounds.
-Used to match aircraft type to pad capacity.</div>
+<div style="color:#34d399;font-weight:700;margin-bottom:6px">🛡️ Operational Status & Flags</div>
+<div style="color:#94a3b8">ADIP status (Operational / Closed / Restricted), military code, and
+private-use flag — shown in the booking card and used to block routing to ineligible pads.</div>
 </div>""", unsafe_allow_html=True)
     adip2.markdown("""
 <div style="background:#0a1628;border:1px solid #34d399;border-radius:8px;padding:10px 12px;font-size:12px">
-<div style="color:#34d399;font-weight:700;margin-bottom:6px">🧭 Approach Bearings & Corridors</div>
-<div style="color:#94a3b8">ADIP remarks encode preferred ingress/egress bearings and obstacle-clearance
-notes. Enables turn-by-turn aerial approach instructions in the routing output.</div>
+<div style="color:#34d399;font-weight:700;margin-bottom:6px">🧭 Coordination Notes (LLM decoded)</div>
+<div style="color:#94a3b8">Raw FAA remarks decoded to plain English by LLM at booking time.
+Passengers see "Contact New York Approach on 516-683-2962" — not raw FAA notation.</div>
 </div>""", unsafe_allow_html=True)
     adip3.markdown("""
 <div style="background:#0a1628;border:1px solid #34d399;border-radius:8px;padding:10px 12px;font-size:12px">
-<div style="color:#34d399;font-weight:700;margin-bottom:6px">📋 Facility & Inspection Data</div>
-<div style="color:#94a3b8">Design category, last inspection date, EV charging availability, and ATC
-contact. Feeds the HIE freshness score and infrastructure readiness flag.</div>
+<div style="color:#34d399;font-weight:700;margin-bottom:6px">🌤️ METAR Flight Category</div>
+<div style="color:#94a3b8">Live METAR from Aviation Weather Center — VFR / MVFR / IFR / LIFR
+colour-coded in booking card and FAA map popups. No API key required.</div>
 </div>""", unsafe_allow_html=True)
-
-    st.caption("⭐ Phase 3 is a stretch goal for M3. Raw ADIP JSON is already fetched and stored in data/adip_raw/ for offline field discovery.")
 
 
 # ── TAB 2 · Literature Review ────────────────────────────────────────────────
@@ -1006,11 +1021,10 @@ with tab_lit:
                 "and multilingual fine-tuning as priority future directions."
             ),
             "skyroute_benefit": (
-                "Provides the academic umbrella for HIE Phase 2: querying an LLM (Gemini/GPT-4o with search "
-                "grounding) about a helipad's operational status from its name and location. "
-                "The retrieval-augmented hybrid pattern identified in the review is exactly the architecture "
-                "used — OSM name + coordinates as retrieval keys, LLM as the reasoning layer — and the review's "
-                "benchmarks offer a framework for evaluating HIE Phase 2 classification accuracy."
+                "Underpins HIE Phase 3: the LLM concierge decodes cryptic FAA ADIP remarks into plain-English "
+                "coordination notes at booking time, and handles geocoding of business-name addresses via a "
+                "retrieval-augmented cascade. The GeoLLM benchmark framework is directly applicable to "
+                "evaluating the LLM's spatial reasoning quality in the Route Assistant."
             ),
         },
     ]
@@ -1139,6 +1153,8 @@ _ROUTING_HTML_TEMPLATE = """<!DOCTYPE html>
     * { margin:0; padding:0; box-sizing:border-box; }
     html, body { width:100%; height:100%; overflow:hidden; font-family:'Segoe UI',sans-serif; }
     #map { width:100%; height:570px; }
+    .leaflet-top.leaflet-left { top:10px!important; left:10px!important; }
+    .leaflet-control-zoom { margin:0!important; }
     #aerial-bar {
       width:100%; height:54px;
       background:linear-gradient(90deg,#060b14,#0d1b2a,#060b14);
@@ -1254,7 +1270,8 @@ var radarLayer = L.tileLayer.wms('https://opengeo.ncep.noaa.gov/geoserver/conus/
   attribution: '<a href="https://radar.weather.gov">NWS Radar</a>',
   opacity: 0.7,
 });
-var map = L.map('map', {center: [40.75, -73.5], zoom: 8, layers: [osmDay]});
+var map = L.map('map', {center: [40.75, -73.5], zoom: 8, layers: [osmDay], zoomControl: false});
+L.control.zoom({position: 'topleft'}).addTo(map);
 L.control.scale({metric: true, imperial: true}).addTo(map);
 
 // ── business POIs (Miles Urban destinations) ──────────────────────────────────
@@ -1424,7 +1441,30 @@ var notamLayer = L.geoJSON(notamData, {
   }
 });
 
-var allPointLayers = [helipadLayer, osmHelipadLayer, validatedLayer];
+// ── OSM-only helipads confirmed by YOLO visual detection ──────────────────────
+var osmValidatedData = __OSM_VALIDATED_GEOJSON__;
+var crOsmVal = L.canvas({padding: 0.5});
+var osmValidatedLayer = L.geoJSON(osmValidatedData, {
+  renderer: crOsmVal,
+  pointToLayer: function(f, ll) {
+    return L.circleMarker(ll, {
+      radius:6, color:'#0369a1', fillColor:'#38bdf8', fillOpacity:0.85, weight:2
+    });
+  },
+  onEachFeature: function(f, l) {
+    var p = f.properties;
+    var txt = p.name || 'OSM Helipad';
+    l.bindTooltip('✅ ' + txt, {sticky: true});
+    l.bindPopup(
+      '<b>✅ ' + txt + '</b><br>'+
+      '<small style="color:#38bdf8">HIE visual detection confirmed (OSM source)</small><br>'+
+      (p.osm_id ? 'OSM ID: '+p.osm_id : ''),
+      {maxWidth: 220}
+    );
+  }
+});
+
+var allPointLayers = [helipadLayer, osmHelipadLayer, validatedLayer, osmValidatedLayer];
 
 // ── Mapbox traffic basemap (green/yellow/red roads) ──────────────────────────
 // Uses the traffic-day-v2 style — shows live congestion colors on a full basemap.
@@ -1441,6 +1481,7 @@ var _overlays = {
   'Helipads (FAA)': helipadLayer,
   'Helipads (OSM)': osmHelipadLayer,
   '✅ HIE Validated': validatedLayer,
+  '✅ OSM Validated': osmValidatedLayer,
   'Business POIs':  poiLayer,
   'Exec. Residences': resLayer,
   '🚫 TFRs (airspace)': notamLayer,
@@ -1455,9 +1496,8 @@ L.control.layers(
   _overlays,
   {collapsed: false}
 ).addTo(map);
-helipadLayer.addTo(map);
-osmHelipadLayer.addTo(map);
 validatedLayer.addTo(map);
+osmValidatedLayer.addTo(map);
 poiLayer.addTo(map);
 resLayer.addTo(map);
 // notamLayer, radarLayer off by default — user toggles via layer control
@@ -1948,8 +1988,10 @@ map.on('click', async function(e){
 </html>"""
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def build_routing_html(faa_df: pd.DataFrame, osm_df: pd.DataFrame, js_v: str = "m4.17", tomtom_key: str = "",
+@st.cache_data(ttl=1800, show_spinner=False)
+def build_routing_html(faa_df: pd.DataFrame, osm_df: pd.DataFrame,
+                       osm_validated_df: pd.DataFrame | None = None,
+                       js_v: str = "m4.18", tomtom_key: str = "",
                        mapbox_token: str = "",
                        init_lat_a: float = 0.0, init_lon_a: float = 0.0,
                        init_lat_b: float = 0.0, init_lon_b: float = 0.0) -> str:
@@ -1958,6 +2000,7 @@ def build_routing_html(faa_df: pd.DataFrame, osm_df: pd.DataFrame, js_v: str = "
     Args:
         faa_df: FAA helipad DataFrame with lat, lon, IDENT, NAME columns.
         osm_df: OSM helipad DataFrame with lat, lon, name, faa, surface, ele columns.
+        osm_validated_df: osm_validated.csv DataFrame; only hie_visual_detected=True rows are shown.
 
     Returns:
         Complete HTML string for use with streamlit.components.v1.html().
@@ -1987,12 +2030,19 @@ def build_routing_html(faa_df: pd.DataFrame, osm_df: pd.DataFrame, js_v: str = "
         for r in _osm.to_dict(orient="records")
     ]
 
-    # HIE-validated subset (gt=1 from inspector_results.csv)
+    # HIE-validated subset: visually confirmed (gt=1) OR ADIP operational + recently inspected
     _insp_path = DATA_DIR / "inspector_results.csv"
     validated_geojson = '{"type":"FeatureCollection","features":[]}'
     if _insp_path.exists():
         _insp = pd.read_csv(_insp_path)
         _val_idents = set(_insp[_insp["gt"] == 1]["ident"].str.upper())
+        # ADIP fallback: no visual marking found but registry confirms operational + inspected ≤1 yr ago
+        if "operational" in faa_df.columns and "data_freshness_days" in faa_df.columns:
+            _adip_fallback = faa_df[
+                (faa_df["operational"] == 1) &
+                (faa_df["data_freshness_days"].fillna(9999) <= 365)
+            ]["IDENT"].dropna().str.upper()
+            _val_idents = _val_idents | set(_adip_fallback)
         _val_cols = [c for c in ["IDENT", "NAME", "STATE", "SERVCITY"] if c in faa_df.columns]
         _val = faa_df[faa_df["IDENT"].isin(_val_idents)].dropna(subset=["lat", "lon"])
         _val = _val[_val_cols + ["lat", "lon"]].copy()
@@ -2008,6 +2058,23 @@ def build_routing_html(faa_df: pd.DataFrame, osm_df: pd.DataFrame, js_v: str = "
             ]
         })
 
+    # OSM-only helipads confirmed by YOLO visual detection
+    osm_validated_geojson = '{"type":"FeatureCollection","features":[]}'
+    if osm_validated_df is not None and not osm_validated_df.empty:
+        _ov = osm_validated_df[osm_validated_df["hie_visual_detected"]].dropna(subset=["lat", "lon"])
+        osm_validated_geojson = json.dumps({
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature",
+                 "geometry": {"type": "Point", "coordinates": [float(r["lon"]), float(r["lat"])]},
+                 "properties": {
+                     "name": str(r.get("name", "") or ""),
+                     "osm_id": str(r.get("osm_id", "") or ""),
+                 }}
+                for r in _ov.to_dict(orient="records")
+            ]
+        })
+
     # TFR GeoJSON for JS routing checks
     tfrs = _get_active_tfrs()
     notam_geojson = json.dumps(tfrs_to_geojson(tfrs))
@@ -2019,6 +2086,7 @@ def build_routing_html(faa_df: pd.DataFrame, osm_df: pd.DataFrame, js_v: str = "
         .replace("__GEOJSON__", faa_geojson)
         .replace("__OSM_GEOJSON__", osm_geojson)
         .replace("__VALIDATED_GEOJSON__", validated_geojson)
+        .replace("__OSM_VALIDATED_GEOJSON__", osm_validated_geojson)
         .replace("__NOTAM_GEOJSON__", notam_geojson)
         .replace("__WEATHER_THRESHOLDS__", json.dumps(PRECIP_THRESHOLDS))
         .replace("__TOMTOM_API_KEY__", tomtom_key)
@@ -2582,9 +2650,9 @@ with tab_eda:
     <tr>
       <td style="color:#94a3b8;font-weight:600;padding:5px 12px 5px 0;width:90px;vertical-align:top">MODEL</td>
       <td style="color:#e2e8f0;padding:5px 0">
-        HIE validation pipeline — Grounding DINO visual detection (Phase 1) followed by
-        LLM operational-status classification (Phase 2) — promoting OSM-only candidate
-        pads into the live routing pool.
+        HIE validation pipeline — YOLO11m visual detection on FAA candidates (Phase 1)
+        followed by YOLO11m cascade on OSM-only pads (Phase 2) — promoting visually
+        confirmed helipads into the live routing pool.
       </td>
     </tr>
     <tr>
@@ -3326,7 +3394,7 @@ if _ar and _ar.get("origin") and _ar.get("destination"):
         init_lat_b=_ar["destination"]["lat"], init_lon_b=_ar["destination"]["lon"],
     )
 components.html(
-    build_routing_html(faa_raw, osm_raw, **_sim_kwargs),
+    build_routing_html(faa_raw, osm_raw, osm_validated_df=_load_osm_validated(), **_sim_kwargs),
     height=650, scrolling=False)
 
 st.divider()
@@ -3349,22 +3417,6 @@ _INSP_B_SOURCES: dict[str, str] = {
     "FAA — CONUS (3 000+)":       "faa_national",
     "OSM — NE US (1 500+)":       "osm_neus",
 }
-
-
-@st.cache_data
-def _load_osm_validated() -> pd.DataFrame | None:
-    """Load osm_validated.csv produced by scripts/validate_osm_only.py."""
-    path = DATA_DIR / "osm_validated.csv"
-    if not path.exists():
-        return None
-    df = pd.read_csv(path)
-    for col in ("lat", "lon", "hie_confidence", "hie_offset_m"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["hie_visual_detected"] = df["hie_visual_detected"].astype(bool)
-    df["osm_id"] = df["osm_id"].astype(str)
-    df["name"] = df["name"].fillna("").astype(str)
-    return df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
 
 @st.cache_data
@@ -4413,7 +4465,7 @@ def _mly_viewer_html(lat: float, lon: float, height: int = 260,
     map_h   = height - 48
     mly_url = f"https://www.mapillary.com/app/?lat={lat:.6f}&lng={lon:.6f}&z=17"
     if image_id:
-        mly_url = f"https://www.mapillary.com/app/?image_key={image_id}"
+        mly_url = f"https://www.mapillary.com/app/?pKey={image_id}"
     gmap    = f"https://maps.google.com/?q={lat:.6f},{lon:.6f}"
 
     if thumb_url:
@@ -4488,7 +4540,36 @@ L.marker([LAT, LON], {{icon:dot}}).addTo(leafMap);
 # TAB 7 · Route Assistant — LLM-powered natural language routing (M4)
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab_agent:
+def _metar_badge(metar: dict | None) -> str:
+    """Return an HTML METAR badge string for inline rendering.
+
+    Returns empty string when no METAR is available.
+    """
+    if not metar:
+        return ""
+    cat   = metar.get("flight_category") or ""
+    color = {"VFR": "#16a34a", "MVFR": "#2563eb", "IFR": "#dc2626", "LIFR": "#7e22ce"}.get(cat, "#6b7280")
+    parts = []
+    if metar.get("wind_kt") is not None:
+        gust = metar.get("wind_gust_kt")
+        parts.append(f"💨 {metar['wind_kt']}{'G' + str(gust) if gust else ''}kt")
+    if metar.get("visibility_sm") is not None:
+        parts.append(f"👁 {metar['visibility_sm']}sm")
+    if metar.get("ceiling_ft") is not None:
+        parts.append(f"☁️ {metar['ceiling_ft']:,}ft")
+    details = " · ".join(parts) if parts else "no obs"
+    badge = (f'<span style="background:{color};color:#fff;padding:2px 10px;'
+             f'border-radius:4px;font-weight:700;font-size:0.82em">{cat or "N/A"}</span>')
+    return f"{badge} {details}"
+
+
+@_fragment
+def _route_assistant_content() -> None:
+    """Render the Route Assistant tab as an isolated fragment.
+
+    Isolating this tab prevents chat messages and spinner reruns from
+    rebuilding the EDA maps, hotspot maps, and routing simulator HTML.
+    """
     st.markdown("### 💬 Route Assistant")
     st.caption(
         "Describe where you need to go in plain English — the assistant plans your "
@@ -4497,17 +4578,34 @@ with tab_agent:
     )
 
     # ── Helipad pool + FAA ADIP data ──────────────────────────────────────────
-    _agent_helipads: list[dict] = []
-    _agent_faa = faa_raw.dropna(subset=["lat", "lon"])
-    for _, _ar in _agent_faa.iterrows():
-        _agent_helipads.append({
-            "lat":   float(_ar["lat"]),
-            "lon":   float(_ar["lon"]),
-            "name":  str(_ar.get("NAME", "") or "").strip() or None,
-            "ident": str(_ar.get("IDENT", "") or "").strip() or None,
-        })
+    if "_agent_helipads" not in st.session_state:
+        faa_raw, _ = load_data()
+        _agent_faa = faa_raw.dropna(subset=["lat", "lon"])
+        _pool: list[dict] = [
+            {
+                "lat":   float(r["lat"]),
+                "lon":   float(r["lon"]),
+                "name":  str(r.get("NAME", "") or "").strip() or None,
+                "ident": str(r.get("IDENT", "") or "").strip() or None,
+            }
+            for r in _agent_faa.to_dict("records")
+        ]
+        # Append visually-confirmed OSM-only helipads (hie_visual_detected=True)
+        _osm_val = _load_osm_validated()
+        if _osm_val is not None and not _osm_val.empty:
+            _confirmed = _osm_val[_osm_val["hie_visual_detected"]].dropna(subset=["lat", "lon"])
+            for r in _confirmed.to_dict("records"):
+                _pool.append({
+                    "lat":   float(r["lat"]),
+                    "lon":   float(r["lon"]),
+                    "name":  str(r.get("name", "") or "").strip() or None,
+                    "ident": None,  # OSM-only pads have no FAA IDENT
+                })
+        st.session_state["_agent_helipads"] = _pool
+    _agent_helipads: list[dict] = st.session_state["_agent_helipads"]
     # Pass the full enriched DataFrame for ADIP lookups during booking
-    _adip_df = faa_raw  # faa_raw auto-selects enriched CSV when present
+    # load_data() returns instantly from @st.cache_data — no disk read after first load
+    _adip_df, _ = load_data()
 
     if not os.getenv("GROQ_API_KEY"):
         st.warning(
@@ -4602,6 +4700,9 @@ with tab_agent:
                 f"({_bl['dist_km']} km · {_bl['duration_min']} min)"
             )
             with st.expander(f"📋 Departure: {dep['name']} ({dep['ident'] or 'OSM'})", expanded=True):
+                _dep_badge = _metar_badge(_bl.get("metar_dep"))
+                if _dep_badge:
+                    st.markdown(_dep_badge, unsafe_allow_html=True)
                 _hc1, _hc2 = st.columns(2)
                 _hc1.markdown(
                     f"**Status:** {dep.get('status','—')}  \n"
@@ -4621,6 +4722,9 @@ with tab_agent:
                     height=260,
                 )
             with st.expander(f"📋 Arrival: {arr['name']} ({arr['ident'] or 'OSM'})", expanded=True):
+                _arr_badge = _metar_badge(_bl.get("metar_arr"))
+                if _arr_badge:
+                    st.markdown(_arr_badge, unsafe_allow_html=True)
                 _ac1, _ac2 = st.columns(2)
                 _ac1.markdown(
                     f"**Status:** {arr.get('status','—')}  \n"
@@ -4646,9 +4750,9 @@ with tab_agent:
         st.markdown("**Try one of these:**")
         _ex_cols = st.columns(3)
         _examples = [
-            "I need to be at New Jersey Financial Center by 14:00",
-            "Get me from JFK to downtown Manhattan before 09:30",
-            "Fastest way from Bronxville to Midtown for a 16:00 meeting",
+            "Fastest way from Midtown to Greenwich CT for a 16:00 meeting",
+            "Good restaurant near the 30th St Heliport",
+            "What's the weather in Greenwich this afternoon?",
         ]
         for _ei, (_ec, _ex) in enumerate(zip(_ex_cols, _examples)):
             if _ec.button(_ex, key=f"ex_{_ei}"):
@@ -4656,7 +4760,9 @@ with tab_agent:
                 st.rerun()
 
     # ── Chat input ────────────────────────────────────────────────────────────
-    _user_input = st.chat_input("Where do you need to be, and when? (or 'book now' to book)") or _pending
+    _user_input = (
+        st.chat_input("Route, nearby places, weather… ask anything about your trip") or _pending
+    )
     if _user_input:
         st.session_state["agent_messages"].append({"role": "user", "content": _user_input})
         # Clear persisted booking leg cards so stale details don't show during new request
@@ -4664,54 +4770,96 @@ with tab_agent:
         with st.chat_message("user"):
             st.markdown(_user_input)
 
-        _last_route = st.session_state.get("_agent_last_route")
-        _booking_mode = is_booking_intent(_user_input) and _last_route is not None
-        _book_legs_to_render: list = []
-
+        _route_map_html = ""
         with st.chat_message("assistant"):
-            # ── BOOKING FLOW ──────────────────────────────────────────────
-            if _booking_mode:
-                with st.spinner("Looking up helipad contacts and arranging ground transport…"):
-                    _book_legs_to_render = run_booking(
-                        _last_route["route"], faa_adip_df=_adip_df
-                    )
-                # Persist so leg cards survive the rerun triggered by agent_messages.append
-                st.session_state["_agent_booking_legs"] = _book_legs_to_render
+            _TOOL_ICONS = {
+                "geocode": "📍",
+                "search_nearby_places": "🔍",
+                "get_weather": "🌤️",
+                "compute_route": "🚁",
+                "confirm_booking": "📋",
+            }
 
-                st.success("**Booking confirmed (simulated)** — step-by-step details below:")
-                _reply = "Booking confirmed (simulated). Step-by-step details shown below."
+            def _agent_step_label(name: str, args: dict) -> str:
+                if name == "search_nearby_places":
+                    return f"Searching for **{args.get('category','?')}** near _{args.get('location','?')}_"
+                if name == "get_weather":
+                    return f"Getting weather for _{args.get('location','?')}_"
+                if name == "compute_route":
+                    return f"Computing route _{args.get('origin','?')}_ → _{args.get('destination','?')}_"
+                if name == "confirm_booking":
+                    return f"Booking _{args.get('origin','?')}_ → _{args.get('destination','?')}_"
+                if name == "geocode":
+                    return f"Locating _{args.get('address','?')}_"
+                return name
 
-            # ── ROUTE PLANNING FLOW ────────────────────────────────────────
+            def _agent_result_label(name: str, res: dict) -> str:
+                if "error" in res:
+                    return f"⚠️ {res['error']}"
+                if name == "search_nearby_places":
+                    n = len(res.get("results", []))
+                    return res.get("note", f"found {n} result{'s' if n != 1 else ''}")
+                if name == "get_weather":
+                    return f"{res.get('conditions','')} · {res.get('temperature_f','?')}°F"
+                if name == "compute_route":
+                    return f"{res.get('total_min','?')} min total · saves {res.get('time_saved_min','?')} min vs driving"
+                if name == "confirm_booking":
+                    return f"confirmed · ref {res.get('confirmation_id','?')}"
+                if name == "geocode":
+                    lat, lon = res.get("lat", 0), res.get("lon", 0)
+                    return f"{res.get('display_name', f'{lat:.4f}, {lon:.4f}')}"
+                return "done"
+
+            with st.status("Working…", expanded=True) as _agent_status:
+                def _on_agent_step(event: str, data: dict) -> None:
+                    if event == "thinking":
+                        msg_txt = "🤔 Thinking…" if data.get("iteration", 0) == 0 else "🤔 Processing results…"
+                        st.write(msg_txt)
+                    elif event == "tool_call":
+                        icon = _TOOL_ICONS.get(data["name"], "🛠️")
+                        st.write(f"{icon} {_agent_step_label(data['name'], data.get('args', {}))}")
+                    elif event == "tool_result":
+                        st.write(f"   ↳ {_agent_result_label(data['name'], data.get('result', {}))}")
+                    elif event == "booking_step":
+                        st.write(data.get("msg", ""))
+
+                _result = run_agent_v2(
+                    _user_input,
+                    helipads=_agent_helipads,
+                    history=st.session_state["_agent_llm_history"],
+                    faa_adip_df=_adip_df,
+                    status_callback=_on_agent_step,
+                )
+                _agent_status.update(label="Done", state="complete", expanded=False)
+
+            _reply = _result.get("response") or ""
+
+            if _result.get("error"):
+                _err_msg = f"Sorry — {_result['error']}"
+                st.warning(_err_msg)
+                if not _reply:
+                    _reply = _err_msg
             else:
-                with st.spinner("Computing your SkyRoute itinerary…"):
-                    _result = run_agent(
-                        _user_input,
-                        helipads=_agent_helipads,
-                        history=st.session_state["_agent_llm_history"],
-                    )
+                # TFR warnings — shown before narrative
+                if _result.get("tfrs_ignored"):
+                    st.error("🚫 TFR OVERRIDE ACTIVE — routing through restricted airspace. For planning only; operator approval required before flight.")
+                for _tfr_txt in _result.get("tfr_warnings", []):
+                    st.warning(f"⚠️ Active TFR on aerial segment: {_tfr_txt}")
 
-                if _result["error"]:
-                    _reply = f"Sorry — {_result['error']}"
-                    st.warning(_reply)
-                else:
-                    _route = _result["route"]
-                    _reply = _result["response"] or ""
+                # Precipitation warnings
+                for _pw in _result.get("precip_warnings", []):
+                    st.warning(f"🌧️ Precipitation on aerial leg — {_pw}")
 
-                    # Store for booking and simulator sync
-                    st.session_state["_agent_last_route"] = _result
-                    # Stage params for LLM history — written after _reply is known
-                    st.session_state["_agent_llm_history_pending"] = _result.get("params")
-
-                    # TFR warnings — show before the route narrative
-                    if _result.get("tfrs_ignored"):
-                        st.error("🚫 TFR OVERRIDE ACTIVE — routing through restricted airspace. For planning only; operator approval required before flight.")
-                    for _tfr_txt in _result.get("tfr_warnings", []):
-                        st.warning(f"⚠️ Active TFR on aerial segment: {_tfr_txt}")
-
+                # Always show the model's final narrative
+                if _reply:
                     st.markdown(_reply)
+
+                # ── Route display (if compute_route tool was called) ───────
+                _route = _result.get("route")
+                if _route:
+                    st.session_state["_agent_last_route"] = _result
                     st.divider()
 
-                    # Metrics
                     _rc1, _rc2, _rc3, _rc4 = st.columns(4)
                     _rc1.metric("Total time",  f"{_route['total_min']} min")
                     _rc2.metric("Drive only",  f"{_route['drive_only_min']} min")
@@ -4720,7 +4868,6 @@ with tab_agent:
                     if _route.get("departure_time"):
                         _rc4.metric("Depart by", _route["departure_time"])
 
-                    # Leg table
                     if _route["legs"]:
                         _leg_rows = []
                         for _lg in _route["legs"]:
@@ -4734,9 +4881,8 @@ with tab_agent:
                             })
                         st.dataframe(_leg_rows, use_container_width=True, hide_index=True)
 
-                    # Route map
-                    _orig = _result.get("origin", {})
-                    _dest = _result.get("destination", {})
+                    _orig  = _result.get("origin", {})
+                    _dest  = _result.get("destination", {})
                     _pad_a = _route.get("nearest_pad_origin")
                     _pad_b = _route.get("nearest_pad_dest")
                     if _orig.get("lat") and _dest.get("lat"):
@@ -4779,7 +4925,8 @@ with tab_agent:
                             ).add_to(_rm)
                         _rm.fit_bounds([[min(_all_lats)-0.02, min(_all_lons)-0.02],
                                         [max(_all_lats)+0.02, max(_all_lons)+0.02]])
-                        st_folium(_rm, height=340, width=None, returned_objects=[])
+                        _route_map_html = _rm.get_root().render()
+                        components.html(_route_map_html, height=340, scrolling=False)
 
                     st.info(
                         "Type **yes** or **book it** to confirm and see helipad coordination "
@@ -4788,7 +4935,7 @@ with tab_agent:
                         icon="ℹ️",
                     )
 
-                    with st.expander("Resolved locations & extracted params", expanded=False):
+                    with st.expander("Resolved locations", expanded=False):
                         _lc1, _lc2 = st.columns(2)
                         _lc1.markdown(
                             f"**Origin:** {_orig.get('text','—')}  \n"
@@ -4798,23 +4945,22 @@ with tab_agent:
                             f"**Destination:** {_dest.get('text','—')}  \n"
                             f"`{_dest.get('lat',0):.5f}, {_dest.get('lon',0):.5f}`"
                         )
-                        if _result.get("params"):
-                            st.json(_result["params"])
 
-        st.session_state["agent_messages"].append({"role": "assistant", "content": _reply})
+                # ── Booking display (if confirm_booking tool was called) ───
+                _booking_legs = _result.get("booking_legs")
+                if _booking_legs:
+                    st.session_state["_agent_booking_legs"] = _booking_legs
+                    st.success("**Booking confirmed (simulated)** — step-by-step details below:")
 
-        # Update LLM history — store extracted params JSON as assistant turn so future
-        # requests can reference "same destination", "arrive earlier", etc.
-        if not _booking_mode:
-            _params_for_history = st.session_state.get("_agent_llm_history_pending")
-            if _params_for_history:
-                st.session_state["_agent_llm_history"].append(
-                    {"role": "user", "content": _user_input}
-                )
-                st.session_state["_agent_llm_history"].append(
-                    {"role": "assistant", "content": json.dumps(_params_for_history)}
-                )
-                st.session_state.pop("_agent_llm_history_pending", None)
+        st.session_state["agent_messages"].append({
+            "role": "assistant",
+            "content": _reply,
+            "route_map_html": _route_map_html,
+        })
+
+        # Update multi-turn history — store full tool-call-aware messages from this turn
+        if _result.get("_messages"):
+            st.session_state["_agent_llm_history"] = _result["_messages"]
 
         # Rerun so elements rendered above (chat history, booking leg cards) reflect
         # the session state that was just updated inside this block.
@@ -4828,3 +4974,7 @@ with tab_agent:
             st.session_state["_agent_booking_legs"] = []
             st.session_state.pop("_agent_last_route", None)
             st.rerun()
+
+
+with tab_agent:
+    _route_assistant_content()

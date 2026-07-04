@@ -423,16 +423,19 @@ st.tabs(["📍 Problem", "📚 Literature", "🏪 Market", "📊 EDA & HIE", "�
 - YOLO sub-tab: 4 metric KPI tiles → radar chart + PR curve side-by-side → action caption (YOLO11m = production / YOLO11s = discovery) → P vs conf + R vs conf → individual model expanders (each with 5 plots)
 
 **Tab 7 — Route Assistant (💬)**
-- Isolated via `@st.experimental_fragment`
-- Natural language chat powered by Groq/Llama-3.3-70b-versatile (`src/agent.py`)
-- Intent detection: route planning, booking confirmation, helipad info queries
-- Geocoding: TomTom Fuzzy Search → LLM address extraction → Nominatim (handles business names and floor-level addresses)
-- After route planning, user confirms with "yes" / "book it" / "book it now"
-- **Booking flow** per leg:
-  - *Helicopter leg:* ADIP helipad info (status, ownership, METAR, coordination note decoded from raw FAA remarks via LLM), Mapillary street-level thumbnail
+- Isolated via `@st.experimental_fragment` — chat messages don't trigger rebuilding of the 4 Folium maps in other tabs
+- Natural language chat powered by `run_agent_v2()` — a **Level 1 agentic loop** (`src/agent.py`): model decides which tools to call; tools: `geocode`, `search_nearby_places`, `get_weather`, `compute_route`, `confirm_booking`
+- **LLM:** Groq/`llama-3.3-70b-versatile`; auto-fallback to `llama-3.1-8b-instant` on quota/model error
+- **Live thinking panel:** `st.status()` updated via `status_callback` parameter on `run_agent_v2()`; collapses when response is ready
+- Geocoding: TomTom Fuzzy Search → LLM address extraction → Nominatim; handles business names and floor-level addresses
+- **`search_nearby_places`:** TomTom POI Search + `categorySet` hard filter via `_TOMTOM_CATEGORY_MAP` (prevents off-category POI drift — e.g. "fine dining" → TomTom category `7315`)
+- After route planning, user confirms with "yes" / "book it" / "book it now" → triggers `confirm_booking` tool
+- **Booking flow** per leg (parallelised with `ThreadPoolExecutor`):
+  - *Helicopter leg:* METAR badge (VFR/MVFR/IFR/LIFR colour pill + wind/visibility/ceiling) at top of each helipad expander; ADIP helipad info (status, ownership, coordination note decoded from raw FAA remarks via LLM), Mapillary street-level thumbnail
   - *Rideshare leg:* simulated Uber/Waymo fare + deeplinks, Mapillary thumbnails at pickup and dropoff
   - *Walk leg (< 0.5 km):* distance + walk-time card, Mapillary thumbnail at start
-- **Mapillary thumbnails:** image ID found server-side (`find_nearest_mapillary_image`), `thumb_2048_url` fetched via `get_mapillary_thumb_url`, rendered as `<img>` tag — no JS viewer, no CDN library, no WebGL, no CORS issues
+- **Precipitation warnings:** `check_route_precipitation()` called in `_execute_tool()` compute_route branch; `warn` severity → `result["precip_warnings"]` → `st.warning()` banner before route narrative; `avoid` severity → added to `advisory` text
+- **Mapillary thumbnails:** image ID found server-side (`find_nearest_mapillary_image`), `thumb_2048_url` fetched via `get_mapillary_thumb_url`, rendered as `<img>` tag — no JS viewer, no CDN library, no WebGL, no CORS issues; "Open in Mapillary" link uses v4 `?pKey=` URL format (not v3 `?image_key=`)
 
 ### Caching strategy
 
@@ -602,7 +605,7 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 
 ---
 
-## M4 Status — IN PROGRESS (2026-06-27)
+## M4 Status — COMPLETE (2026-07-04)
 
 ### Completed deliverables
 
@@ -623,7 +626,7 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 | Routing performance | `app.py` | 3 OSRM calls → 1 (helipad legs replaced by `estimateDriveLeg`); Dijkstra corridor-bounded; `getAllHelipads()` cached; browser yield before sync work |
 | Launcher scripts | `run.ps1`, `run.bat` | Load `.env`, report key status — safe to commit |
 | **LLM Route Assistant** | `src/agent.py` | Groq/Llama; intent detection (route/book/off_topic); TomTom Fuzzy Search + LLM address extraction + Nominatim geocoding cascade; off-topic guard with negative few-shot examples |
-| **Booking flow** | `src/agent.py` | Per-leg: helicopter (ADIP lookup + METAR), rideshare (Uber/Waymo deeplinks), walk (< 0.5 km threshold) |
+| **Booking flow** | `src/agent.py` | Per-leg: helicopter (ADIP lookup + METAR badge + Mapillary), rideshare (Uber/Waymo deeplinks), walk (< 0.5 km threshold); Phase 1 now 6 parallel threads |
 | **ADIP remarks decoding** | `src/agent.py` | `_decode_adip_remarks()` via Groq/Llama — cryptic FAA remarks → plain English coordination notes |
 | **Mapillary street-level imagery** | `src/agent.py` + `app.py` | Server-side ID lookup (`find_nearest_mapillary_image`) + thumbnail fetch (`get_mapillary_thumb_url`); rendered as `<img>` — no JS viewer, no CORS |
 | **TFR pre-booking check** | `src/agent.py` | `_check_tfrs_on_segment()` — samples 7 points on aerial leg; hard blocks (SECURITY/STADIUM/NDA_TFR/DEF) abort with error; soft TFRs shown as `st.warning()` banners in app before route narrative |
@@ -662,15 +665,36 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 
 **Groq model configuration:** `llama-3.3-70b-versatile` and `meta-llama/llama-4-scout-17b-16e-instruct` are both project-blocked by default in Groq console. Working model as of June 2026: `llama-3.1-8b-instant` (set as `_GROQ_MODEL` primary). To use 70b: go to console.groq.com/settings/project/limits and enable it, then set `_GROQ_MODEL = "llama-3.3-70b-versatile"`. The LLM exception fallback in `extract_nav_params()` now returns `_FALLBACK_PARAMS` (with `destination_text: None`) on any API error — this triggers the destination guard and returns the routing redirect, rather than the previous bug where `user_text` was used as `destination_text`.
 
-### Remaining M4 items
+**`run_agent_v2()` tool-calling loop:** Replaced the single-pass `extract_nav_params()` + hardcoded routing with a `while iterations < 8` loop that gives the 70b model full autonomy to call tools and chain results. The key design choice is that routing internals (TFR check, METAR, ADIP status) are never exposed as user-facing tools — they run inside `compute_route` and `confirm_booking` and surface only as plain-English advisory text. This keeps the tool surface minimal and prevents the model from over-engineering multi-tool chains for simple route queries.
 
-- [ ] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges in routing simulator; VFR/MVFR/IFR colour coding
-- [ ] Precipitation warning banner — NWS per-waypoint intensity check; `st.warning()` banner when intensity > mode threshold
+**Fragment isolation — Route Assistant tab:** The Route Assistant was previously a regular `with tab_agent:` block. Every chat message triggered a full Streamlit rerun, which rebuilt all 4 Folium maps + routing HTML (~2-3s). Wrapping the Route Assistant in `@st.experimental_fragment` isolates it — only the chat fragment reruns on message submission. The helipad pool is built from `load_data()` (which is `@st.cache_data`) on first call and stored in `st.session_state["_agent_helipads"]`. Do not close over outer-scope variables inside a fragment; they become stale on fragment-only reruns.
+
+**`status_callback` pattern for `st.status()`:** The agentic loop has no way to directly call Streamlit from `src/agent.py` (no Streamlit dependency there). The callback indirection keeps the agent logic pure Python while letting `app.py` decide how to present progress. The callback fires at three hooks: `("thinking", {"iteration": N})` before each Groq call, `("tool_call", {"name": ..., "args": ...})` before each tool execution, and `("tool_result", {"name": ..., "result": ...})` after. The `st.status()` context manager auto-collapses the panel when `.update(state="complete")` is called.
+
+**POI search `categorySet` filter:** TomTom's keyword `poiSearch` endpoint matches any business whose description contains the query term. Searching "fine dining" previously returned liquor stores and sandwich shops because their descriptions mention dining. The fix: `_TOMTOM_CATEGORY_MAP` maps user-facing terms to TomTom structured category codes (e.g., "fine dining" → `7315`, "steakhouse" → `7315002`, "coffee" → `9361065`). When a mapping exists, `categorySet=<code>` is added to the API request — this is a server-side hard filter, not a client-side re-rank. The keyword in the URL still provides relevance sorting within the category.
+
+**Parallel booking with `ThreadPoolExecutor`:** `run_booking()` originally made ~28 serial HTTP calls (ADIP POST + Mapillary search + Mapillary thumbnail per leg endpoint). These are now split into two parallel phases: Phase 1 — 6 concurrent fetches (departure ADIP, arrival ADIP, departure Mapillary ID, arrival Mapillary ID, departure METAR, arrival METAR); Phase 2 — 2 concurrent thumbnail URL fetches. Total latency ~3s instead of ~12s. The `ThreadPoolExecutor` is created inside `run_booking()` (not at module level) so it doesn't leak threads if the function raises.
+
+**Mapillary URL v4 format:** The Mapillary Graph API returns numeric image IDs (v4 format). Opening these with the legacy v3 URL `?image_key=<id>` loads the worldwide map, not the specific image. The correct v4 URL is `?pKey=<id>`. One-line fix in `_mly_viewer_html()` in `app.py`.
+
+**TFR time-awareness — US Eastern departure time:** `_aerial_departure_dt()` computes the estimated UTC wall-clock time when the helicopter leg departs. If the user specified an arrival time (e.g. "get me there by 16:00"), that time is interpreted as **US Eastern** (via `zoneinfo.ZoneInfo("America/New_York")`) regardless of what timezone the server is in. This is correct for the NYC metro use-case and ensures DST is handled correctly. `tzdata>=2024.1` in `requirements.txt` provides the IANA timezone database on Windows and Streamlit Cloud (both lack it by default). `_check_tfrs_on_segment()` receives the computed `departure_dt` and skips TFRs whose `expires_utc` is before that time — expired TFRs are silently filtered, not counted as hard blocks.
+
+**HIE validated layer ADIP fallback:** The `validatedLayer` GeoJSON in the routing simulator is built from two sources: (1) FAA helipads with `gt==1` in `inspector_results.csv` (YOLO visually confirmed), and (2) FAA helipads where `operational==1` AND `data_freshness_days<=365` even if YOLO found no visual marking. This recovers Type B false negatives — operational helipads with no painted H in NAIP imagery (grass fields, faded markings, post-NAIP-acquisition construction). The 365-day threshold and `fillna(9999)` guard are in `app.py` around the `_val_idents` construction block.
+
+**METAR badge `_metar_badge()` helper:** Defined as a module-level function in `app.py` just before `@_fragment def _route_assistant_content()`. Returns an HTML string with a colour-coded `<span>` pill (green=VFR, blue=MVFR, red=IFR, purple=LIFR) followed by wind/visibility/ceiling inline text. Returns empty string when METAR is None — callers check `if _dep_badge:` before calling `st.markdown(..., unsafe_allow_html=True)`. The `metar_dep` / `metar_arr` keys are in the booking leg dict (set by `run_booking()` Phase 1 via `_fetch_metar`).
+
+**Routing simulator zoom control clipping:** Leaflet's default zoom control is at `topleft`. The layer control panel is at `topright`. When the layer control panel expands (many layers), on some display sizes the top-left area of the iframe becomes crowded and scrolling clips the zoom buttons. Fix: `zoomControl: false` in `L.map()` init, then `L.control.zoom({position: 'bottomleft'}).addTo(map)`. `bottomleft` has no other controls, so there is nothing to compete with.
+
+### Remaining Final items
+
+- [x] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges; VFR/MVFR/IFR colour coding (done 2026-07-04)
+- [x] Precipitation warning banner — NWS per-waypoint intensity check; `st.warning()` banner when intensity > mode threshold (done 2026-07-04)
 - [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
 
 ### Final milestone checklist (21 Jul 2026 — Demo Day)
 
-- [ ] All remaining items above
+- [x] METAR per-leg badges + precipitation warnings (done 2026-07-04)
+- [ ] `scripts/compare_registry_accuracy.py`
 - [ ] End-to-end demo run: Miles Urban persona, NYC → Greenwich CT, live TFR + weather layers, multimodal route with aerial advantage callout
 - [ ] `Worklog.md` updated with Final session notes
 

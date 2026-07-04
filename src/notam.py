@@ -45,6 +45,39 @@ _TFR_CACHE_TTL = timedelta(minutes=15)
 
 # ── TFR / NOTAM ────────────────────────────────────────────────────────────────
 
+# FAA WFS date field name variants (tried in order; first non-empty wins)
+_TFR_EFF_FIELDS = ("EFF_DATE", "EFF_LOCAL_DATE_TIME", "EFFECTIVE", "START_DATE")
+_TFR_EXP_FIELDS = ("EXP_DATE", "EXP_LOCAL_DATE_TIME", "EXPIRATION", "END_DATE", "EXPIRE_DATE")
+
+# Common FAA date/time format patterns (UTC / Zulu)
+_TFR_DT_FMTS = (
+    "%m/%d/%Y %H%M",    # "09/01/2026 1400"
+    "%m/%d/%Y %H:%M",   # "09/01/2026 14:00"
+    "%Y/%m/%d %H:%M:%S",  # "2026/09/01 14:00:00"
+    "%Y-%m-%d %H:%M:%S",  # "2026-09-01 14:00:00"
+    "%Y-%m-%dT%H:%M:%S",  # "2026-09-01T14:00:00"
+    "%m/%d/%Y",            # "09/01/2026" (date-only fallback)
+)
+
+
+def _parse_tfr_dt(raw: str) -> Optional[datetime]:
+    """Parse a FAA WFS date/time string to a UTC-aware datetime.
+
+    Tries multiple format patterns; returns None if nothing matches.
+    FAA NOTAMs use Zulu (UTC) time.
+    """
+    if not raw:
+        return None
+    # Strip trailing Z/z and whitespace, normalise
+    s = raw.strip().rstrip("Zz").strip()
+    for fmt in _TFR_DT_FMTS:
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
 def fetch_active_tfrs() -> list[dict]:
     """Fetch all active TFR polygons from the FAA GeoServer WFS endpoint.
 
@@ -96,6 +129,8 @@ def fetch_active_tfrs() -> list[dict]:
             else:
                 continue
 
+            eff_raw = next((props.get(f) for f in _TFR_EFF_FIELDS if props.get(f)), None)
+            exp_raw = next((props.get(f) for f in _TFR_EXP_FIELDS if props.get(f)), None)
             results.append({
                 "notam_id":      props.get("NOTAM_KEY", str(props.get("GID", ""))),
                 "text":          props.get("TITLE", "Active TFR"),
@@ -103,6 +138,8 @@ def fetch_active_tfrs() -> list[dict]:
                 "geometry_type": geo_type,
                 "coordinates":   coordinates,
                 "state":         props.get("STATE", ""),
+                "effective_utc": _parse_tfr_dt(eff_raw or ""),
+                "expires_utc":   _parse_tfr_dt(exp_raw or ""),
             })
 
         log.info("Fetched %d live TFR polygons from GeoServer WFS", len(results))
