@@ -1268,7 +1268,8 @@ var radarLayer = L.tileLayer.wms('https://opengeo.ncep.noaa.gov/geoserver/conus/
   attribution: '<a href="https://radar.weather.gov">NWS Radar</a>',
   opacity: 0.7,
 });
-var map = L.map('map', {center: [40.75, -73.5], zoom: 8, layers: [osmDay], zoomControl: false});
+var _dpr = window.devicePixelRatio || 1;
+var map = L.map('map', {center: [40.75, -73.5], zoom: 8, layers: [osmDay], zoomControl: false, zoomAnimation: (_dpr % 1 === 0)});
 L.control.zoom({position: 'topleft'}).addTo(map);
 L.control.scale({metric: true, imperial: true}).addTo(map);
 
@@ -2298,7 +2299,8 @@ with tab_eda:
             "<script>(function(){var n=0,iv=setInterval(function(){n++;"
             "var el=document.querySelector('.leaflet-container');"
             "if(el){var m=window[el.id];if(m&&typeof m.addLayer==='function'){"
-            "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);}"
+            "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);"
+            "if((window.devicePixelRatio||1)%1!==0)m.options.zoomAnimation=false;}"
             "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
             "if(n>50)clearInterval(iv);},200);})();</script>"
         ))
@@ -2839,7 +2841,8 @@ with tab_eda:
         "<script>(function(){var n=0,iv=setInterval(function(){n++;"
         "var el=document.querySelector('.leaflet-container');"
         "if(el){var m=window[el.id];if(m&&typeof m.addLayer==='function'){"
-        "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);}"
+        "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);"
+            "if((window.devicePixelRatio||1)%1!==0)m.options.zoomAnimation=false;}"
         "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
         "if(n>50)clearInterval(iv);},200);})();</script>"
     ))
@@ -2995,7 +2998,8 @@ with tab_eda:
         "<script>(function(){var n=0,iv=setInterval(function(){n++;"
         "var el=document.querySelector('.leaflet-container');"
         "if(el){var m=window[el.id];if(m&&typeof m.addLayer==='function'){"
-        "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);}"
+        "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);"
+            "if((window.devicePixelRatio||1)%1!==0)m.options.zoomAnimation=false;}"
         "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
         "if(n>50)clearInterval(iv);},200);})();</script>"
     ))
@@ -3141,7 +3145,8 @@ with tab_eda:
         "<script>(function(){var n=0,iv=setInterval(function(){n++;"
         "var el=document.querySelector('.leaflet-container');"
         "if(el){var m=window[el.id];if(m&&typeof m.addLayer==='function'){"
-        "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);}"
+        "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);"
+            "if((window.devicePixelRatio||1)%1!==0)m.options.zoomAnimation=false;}"
         "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
         "if(n>50)clearInterval(iv);},200);})();</script>"
     ))
@@ -3669,7 +3674,8 @@ def _inspector_content() -> None:
                     "<script>(function(){var n=0,iv=setInterval(function(){n++;"
                     "var el=document.querySelector('.leaflet-container');"
                     "if(el){var m=window[el.id];if(m&&typeof m.addLayer==='function'){"
-                    "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);}"
+                    "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);"
+            "if((window.devicePixelRatio||1)%1!==0)m.options.zoomAnimation=false;}"
                     "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
                     "if(n>50)clearInterval(iv);},200);})();</script>"
                 ))
@@ -3794,7 +3800,8 @@ def _inspector_content() -> None:
                 "<script>(function(){var n=0,iv=setInterval(function(){n++;"
                 "var el=document.querySelector('.leaflet-container');"
                 "if(el){var m=window[el.id];if(m&&typeof m.addLayer==='function'){"
-                "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);}"
+                "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);"
+            "if((window.devicePixelRatio||1)%1!==0)m.options.zoomAnimation=false;}"
                 "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
                 "if(n>50)clearInterval(iv);},200);})();</script>"
             ))
@@ -4076,7 +4083,8 @@ def _inspector_content() -> None:
                         "<script>(function(){var n=0,iv=setInterval(function(){n++;"
                         "var el=document.querySelector('.leaflet-container');"
                         "if(el){var m=window[el.id];if(m&&typeof m.addLayer==='function'){"
-                        "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);}"
+                        "if(!m._szZ){m._szZ=true;L.control.zoom({position:'topleft'}).addTo(m);"
+            "if((window.devicePixelRatio||1)%1!==0)m.options.zoomAnimation=false;}"
                         "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
                         "if(n>50)clearInterval(iv);},200);})();</script>"
                     ))
