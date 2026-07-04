@@ -4933,7 +4933,7 @@ def _route_assistant_content() -> None:
                             "_n++;"
                             "var el=document.querySelector('.leaflet-container');"
                             "if(el&&window[el.id]&&typeof window[el.id].addLayer==='function'){"
-                            "L.control.zoom({position:'bottomright'}).addTo(window[el.id]);"
+                            "L.control.zoom({position:'topleft'}).addTo(window[el.id]);"
                             "clearInterval(_iv);}"
                             "if(_n>30)clearInterval(_iv);"
                             "},100);})();</script>"
