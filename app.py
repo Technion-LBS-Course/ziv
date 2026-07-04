@@ -4894,6 +4894,7 @@ def _route_assistant_content() -> None:
                             location=[(min(_all_lats)+max(_all_lats))/2,
                                       (min(_all_lons)+max(_all_lons))/2],
                             zoom_start=11, tiles="CartoDB positron",
+                            zoom_control=False,
                         )
                         folium.Marker(
                             [_orig["lat"], _orig["lon"]], tooltip=f"Origin: {_orig.get('text','A')}",
@@ -4925,6 +4926,18 @@ def _route_assistant_content() -> None:
                             ).add_to(_rm)
                         _rm.fit_bounds([[min(_all_lats)-0.02, min(_all_lons)-0.02],
                                         [max(_all_lats)+0.02, max(_all_lons)+0.02]])
+                        from branca.element import Element as _BrancaEl
+                        _rm.get_root().html.add_child(_BrancaEl(
+                            "<script>(function(){"
+                            "var _n=0,_iv=setInterval(function(){"
+                            "_n++;"
+                            "var el=document.querySelector('.leaflet-container');"
+                            "if(el&&window[el.id]&&typeof window[el.id].addLayer==='function'){"
+                            "L.control.zoom({position:'bottomright'}).addTo(window[el.id]);"
+                            "clearInterval(_iv);}"
+                            "if(_n>30)clearInterval(_iv);"
+                            "},100);})();</script>"
+                        ))
                         _route_map_html = _rm.get_root().render()
                         components.html(_route_map_html, height=340, scrolling=False)
 
