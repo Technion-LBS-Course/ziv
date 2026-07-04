@@ -474,11 +474,15 @@ ADIP coordination remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) are 
 | **POI `categorySet` hard filter** | ✅ Done | `_TOMTOM_CATEGORY_MAP` normalises "fine dining" → `7315`; filter applied at API level, prevents off-category drift |
 | **Mapillary v4 URL fix** | ✅ Done | `?pKey=` (v4) replaces `?image_key=` (v3, broken) in "Open in Mapillary" links |
 | **Routing simulator zoom control** | ✅ Done | Moved to `bottomleft` (`zoomControl:false` + `L.control.zoom({position:'bottomleft'})`) — no longer clipped by layer control panel |
+| **OSM helipad address lookup** | ✅ Done | TomTom reverse geocode for OSM-only helipads (no FAA ident) — street address shown in booking leg card |
+| **8B model tool-call recovery** | ✅ Done | `_recover_tool_use_failed()` in `src/agent.py` — parses `failed_generation` from Groq 400 error, executes tool manually; Route Assistant works when `llama-3.3-70b-versatile` is project-blocked |
+| **Route Assistant rerun fix** | ✅ Done | `st.rerun()` inside fragment fires only after booking confirmations — eliminates full-app grayout on simple queries |
 
 ### Final Milestone Checklist (21 Jul 2026 — Demo Day)
 
 - [x] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges; VFR/MVFR/IFR colour coding
 - [x] Precipitation warning banner — per-waypoint NWS intensity check; `st.warning()` above routing output
+- [x] OSM helipad address lookup, 8B model recovery, fragment rerun fix
 - [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
 - [ ] End-to-end demo walkthrough: Miles Urban persona, NYC → Greenwich CT, live TFR + weather, multimodal route with aerial advantage callout
 - [ ] `Worklog.md` updated with Final session notes

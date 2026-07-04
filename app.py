@@ -807,7 +807,7 @@ from the HelipadCAT dataset with manual annotation correction.
 | **Output** | Bounding box `[x₁,y₁,x₂,y₂]` + confidence score (threshold ≥ 0.50) |
 | **Action — detected** | Centroid projected back to lat/lon → coordinate corrected if offset > 15 m |
 | **Action — not found** | Pad flagged `unverified`; excluded from routing pool |
-| **Metric (M3 KPI)** | F1=0.888 on 747 held-out NE US test chips vs 0.32 registry-only baseline |
+| **Metric (M3 KPI)** | F1=0.888 on 747 held-out NE US test chips vs F1=0.73 XGBoost structured baseline |
 """)
     with ph1_ex:
         st.markdown("""
@@ -4736,7 +4736,8 @@ def _route_assistant_content() -> None:
                     f"**City:** {dep.get('servcity','—')}  \n"
                     f"**Ownership:** {dep.get('ownership','—')}  \n"
                     f"**Private use:** {'Yes' if dep.get('private_use') else 'No'}  \n"
-                    f"**Coordinates:** `{dep['lat']:.5f}, {dep['lon']:.5f}`"
+                    + (f"**Address:** {dep['address']}  \n" if dep.get('address') else "")
+                    + f"**Coordinates:** `{dep['lat']:.5f}, {dep['lon']:.5f}`"
                 )
                 _hc2.markdown(f"**Coordination note:**  \n{dep.get('contact_notes','—')}")
                 if dep.get("adip_url"):
@@ -4758,7 +4759,8 @@ def _route_assistant_content() -> None:
                     f"**City:** {arr.get('servcity','—')}  \n"
                     f"**Ownership:** {arr.get('ownership','—')}  \n"
                     f"**Private use:** {'Yes' if arr.get('private_use') else 'No'}  \n"
-                    f"**Coordinates:** `{arr['lat']:.5f}, {arr['lon']:.5f}`"
+                    + (f"**Address:** {arr['address']}  \n" if arr.get('address') else "")
+                    + f"**Coordinates:** `{arr['lat']:.5f}, {arr['lon']:.5f}`"
                 )
                 _ac2.markdown(f"**Coordination note:**  \n{arr.get('contact_notes','—')}")
                 if arr.get("adip_url"):
@@ -5012,9 +5014,11 @@ def _route_assistant_content() -> None:
         if _result.get("_messages"):
             st.session_state["_agent_llm_history"] = _result["_messages"]
 
-        # Rerun so elements rendered above (chat history, booking leg cards) reflect
-        # the session state that was just updated inside this block.
-        st.rerun()
+        # Rerun only when booking legs were just confirmed — those cards render from
+        # session_state at the top of the fragment and need a second pass to appear.
+        # For all other responses both messages are already rendered inline above.
+        if _result.get("booking_legs"):
+            st.rerun()
 
     # ── Clear conversation ─────────────────────────────────────────────────────
     if st.session_state["agent_messages"]:

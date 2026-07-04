@@ -694,9 +694,24 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 ### Final milestone checklist (21 Jul 2026 — Demo Day)
 
 - [x] METAR per-leg badges + precipitation warnings (done 2026-07-04)
+- [x] OSM helipad address lookup + 8B model recovery + fragment rerun fix (done 2026-07-04)
 - [ ] `scripts/compare_registry_accuracy.py`
 - [ ] End-to-end demo run: Miles Urban persona, NYC → Greenwich CT, live TFR + weather layers, multimodal route with aerial advantage callout
 - [ ] `Worklog.md` updated with Final session notes
+
+### Post-M4 fixes (2026-07-04)
+
+| Fix | File | Detail |
+|-----|------|--------|
+| OSM helipad reverse geocoding | `src/agent.py` | `_reverse_geocode_tomtom(lat, lon)` — TomTom reverse geocode called in Phase 1 parallel block for OSM-only helipads; `address` field attached to `dep_info`/`arr_info`; shown above coordinates in booking card |
+| 8B model tool-call recovery | `src/agent.py` | `_recover_tool_use_failed()` — detects Groq 400 `tool_use_failed`, parses `<function=name>{args}` from `failed_generation`, executes tool via `_execute_tool()`, injects synthetic tool-result turn, asks 8B to format as text; handles both fallback path (70b blocked → 8b) and direct 8b failure |
+| Route Assistant rerun fix | `app.py` | `st.rerun()` inside `@st.experimental_fragment` triggers full app rerun (rebuilds all Folium maps) on Streamlit 1.36; guarded to fire only when `_result.get("booking_legs")` is non-empty — eliminates grayout on weather/routing/general queries |
+
+#### Non-obvious decisions
+
+**Why `_recover_tool_use_failed` parses `failed_generation`:** The 8B model does generate the right tool and right arguments — it just uses `<function=compute_route>{"origin":…}` format instead of the OpenAI schema. The `failed_generation` field in the Groq 400 error body contains the exact attempted call. Parsing and re-executing it is more reliable than retrying the model with a modified prompt.
+
+**Why `st.rerun()` only on booking:** Both user and assistant messages are rendered inline during the fragment's current pass (not only from session_state at the top). Only booking leg cards need a second pass because they render from `st.session_state["_agent_booking_legs"]` at the top of the fragment. Guarding the rerun eliminates a ~2-3s grayout on every non-booking query.
 
 ---
 

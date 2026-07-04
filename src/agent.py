@@ -504,6 +504,38 @@ def _geocode_tomtom(place_name: str) -> Optional[tuple[float, float]]:
     return None
 
 
+def _reverse_geocode_tomtom(lat: float, lon: float) -> dict:
+    """Reverse geocode coordinates to a street address via TomTom.
+
+    Args:
+        lat: Latitude.
+        lon: Longitude.
+
+    Returns:
+        Dict with keys: address (str), poi_name (str). Empty strings if unavailable.
+    """
+    key = os.getenv("TOMTOM_API_KEY", "")
+    if not key:
+        return {"address": "", "poi_name": ""}
+    try:
+        resp = requests.get(
+            f"https://api.tomtom.com/search/2/reverseGeocode/{lat:.6f},{lon:.6f}.json",
+            params={"key": key},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        addresses = resp.json().get("addresses", [])
+        if addresses:
+            addr = addresses[0].get("address", {})
+            return {
+                "address": addr.get("freeformAddress", ""),
+                "poi_name": "",
+            }
+    except Exception as exc:
+        log.warning("TomTom reverse geocode failed for (%s, %s): %s", lat, lon, exc)
+    return {"address": "", "poi_name": ""}
+
+
 def _geocode_nominatim(place_name: str) -> Optional[tuple[float, float]]:
     """Geocode via Nominatim (OSM). Fallback when TomTom unavailable or fails.
 
@@ -1508,6 +1540,104 @@ def run_agent(
 
 # ── Level 1 agentic loop ──────────────────────────────────────────────────────
 
+import re as _re_tool
+
+
+def _recover_tool_use_failed(
+    exc,
+    client,
+    model: str,
+    messages: list,
+    helipads,
+    faa_adip_df,
+    result: dict,
+    status_callback,
+) -> Optional[object]:
+    """Recover from a Groq 400 tool_use_failed error on the 8B model.
+
+    The 8B model sometimes generates ``<function=name>{args}`` instead of the
+    OpenAI tool-calling schema.  Groq rejects it with 400/tool_use_failed but
+    includes the attempted call in ``failed_generation``.  We parse it, execute
+    the tool manually, append a synthetic tool-result turn, then ask the model
+    to format the result as plain text.
+
+    Returns:
+        A ChatCompletion response object on success, None if not recoverable.
+    """
+    err_str = str(exc).lower()
+    if "tool_use_failed" not in err_str and "failed to call a function" not in err_str:
+        return None
+
+    fg = ""
+    if hasattr(exc, "response") and exc.response is not None:
+        try:
+            fg = exc.response.json().get("error", {}).get("failed_generation", "")
+        except Exception:
+            pass
+    if not fg:
+        raw = str(exc)
+        m = _re_tool.search(r"'failed_generation':\s*'([^']*)'", raw)
+        if not m:
+            m = _re_tool.search(r'"failed_generation":\s*"([^"]*)"', raw)
+        if m:
+            fg = m.group(1)
+    if not fg:
+        return None
+
+    m = _re_tool.match(r"<function=(\w+)>(\{.*\})", fg.strip(), _re_tool.DOTALL)
+    if not m:
+        return None
+
+    try:
+        tool_name = m.group(1)
+        tool_args = json.loads(m.group(2))
+    except Exception:
+        return None
+
+    log.info("8B tool_use_failed recovery: executing %s(%s)", tool_name, list(tool_args))
+
+    if status_callback:
+        status_callback("tool_call", {"name": tool_name, "args": tool_args})
+
+    tool_result = _execute_tool(
+        name=tool_name,
+        args=tool_args,
+        helipads=helipads,
+        faa_adip_df=faa_adip_df,
+        result=result,
+        progress_callback=status_callback,
+    )
+
+    if status_callback:
+        status_callback("tool_result", {"name": tool_name, "result": tool_result})
+
+    _fake_id = "recovered_0"
+    messages.append({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": _fake_id,
+            "type": "function",
+            "function": {"name": tool_name, "arguments": json.dumps(tool_args)},
+        }],
+    })
+    messages.append({
+        "role": "tool",
+        "tool_call_id": _fake_id,
+        "content": json.dumps(tool_result),
+    })
+
+    try:
+        return client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0,
+        )
+    except Exception as exc_fmt:
+        log.error("8B formatting call after tool_use_failed recovery failed: %s", exc_fmt)
+        return None
+
+
 def run_agent_v2(
     user_text: str,
     helipads: list[dict],
@@ -1609,7 +1739,28 @@ def run_agent_v2(
                         temperature=0,
                     )
                 except Exception as exc2:
-                    log.error("Groq fallback also failed: %s", exc2)
+                    # 8B sometimes generates <function=name>{args} instead of
+                    # OpenAI format — parse the failed_generation and recover
+                    recovered = _recover_tool_use_failed(
+                        exc2, client, active_model, messages,
+                        helipads, faa_adip_df, result, status_callback,
+                    )
+                    if recovered is not None:
+                        resp = recovered
+                    else:
+                        log.error("Groq fallback also failed: %s", exc2)
+                        result["error"] = "Route Assistant is temporarily unavailable."
+                        return result
+            elif "tool_use_failed" in err_str or "failed to call a function" in err_str:
+                # 8B is already the active model and produced a malformed tool call
+                recovered = _recover_tool_use_failed(
+                    exc, client, active_model, messages,
+                    helipads, faa_adip_df, result, status_callback,
+                )
+                if recovered is not None:
+                    resp = recovered
+                else:
+                    log.error("Groq API error (iteration %d): %s", iteration, exc)
                     result["error"] = "Route Assistant is temporarily unavailable."
                     return result
             else:
@@ -2000,7 +2151,7 @@ def run_booking(route: dict, faa_adip_df=None, progress_callback=None) -> list[d
             from src.notam import fetch_metar as _fetch_metar
             _dep_ident = pad_a.get("ident") or pad_a.get("IDENT") or ""
             _arr_ident = pad_b.get("ident") or pad_b.get("IDENT") or ""
-            with ThreadPoolExecutor(max_workers=6) as ex:
+            with ThreadPoolExecutor(max_workers=8) as ex:
                 f_dep        = ex.submit(lookup_helipad_info,
                                          pad_a.get("ident"), pad_a.get("name"),
                                          pad_a["lat"], pad_a["lon"], faa_adip_df)
@@ -2011,9 +2162,16 @@ def run_booking(route: dict, faa_adip_df=None, progress_callback=None) -> list[d
                 f_mly_b      = ex.submit(find_nearest_mapillary_image, pad_b["lat"], pad_b["lon"])
                 f_metar_dep  = ex.submit(_fetch_metar, _dep_ident) if _dep_ident else None
                 f_metar_arr  = ex.submit(_fetch_metar, _arr_ident) if _arr_ident else None
+                # Reverse geocode OSM-only helipads (no FAA ident) to get street address
+                f_rg_dep     = ex.submit(_reverse_geocode_tomtom, pad_a["lat"], pad_a["lon"]) if not _dep_ident else None
+                f_rg_arr     = ex.submit(_reverse_geocode_tomtom, pad_b["lat"], pad_b["lon"]) if not _arr_ident else None
 
             dep_info  = f_dep.result()
             arr_info  = f_arr.result()
+            if f_rg_dep:
+                dep_info["address"] = f_rg_dep.result().get("address", "")
+            if f_rg_arr:
+                arr_info["address"] = f_rg_arr.result().get("address", "")
             mly_a_id  = f_mly_a.result() or ""
             mly_b_id  = f_mly_b.result() or ""
             metar_dep = f_metar_dep.result() if f_metar_dep else None
