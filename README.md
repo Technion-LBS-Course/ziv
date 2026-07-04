@@ -46,8 +46,9 @@ Raw helipad databases (FAA, OSM) are incomplete, stale, and contain military or 
 
 ```
 Raw Input              Phase 1                              Phase 2 ⭐              Output
-FAA · OSM  →  YOLO11m visual detection          →  ADIP structured scoring  →  ✅ Validated pad
-747+ records   cascade: CV → YOLO11m fine-tuned     XGBoost on 17 features      added to routing
+FAA · OSM  →  YOLO11m visual detection          →  ADIP status gate         →  ✅ Validated pad
+747+ records   cascade: CV → YOLO11m fine-tuned     operational==1 +            added to routing
+                                                     freshness ≤ 365 days
 ```
 
 ### Why Two Phases?
@@ -66,7 +67,7 @@ Phase 1 cannot distinguish these two cases on its own. Phase 2 uses independent 
 | Phase | Signal | Handles |
 |-------|--------|---------|
 | **Phase 1 — Visual** | NAIP imagery chip + YOLO11m (production) / YOLO11s (discovery mode) | Visually marked pads (H, cross, circle, rooftop paint) |
-| **Phase 2 — Structured** | FAA ADIP status, ownership type, military flags, inspection age, XGBoost scoring | Named pads regardless of visual marker; military/private/closure filtering; stale-record detection |
+| **Phase 2 — Structured** | FAA ADIP `operational==1` + `data_freshness_days ≤ 365`, military/private flags | Named pads regardless of visual marker; military/private/closure filtering; stale-record detection |
 
 The final routing pool blends both phases — it is **not** a hard gate on visual detection alone. A hospital rooftop helipad with no painted H but a current ADIP operational status and recent inspection will still be included even if Phase 1 returns no detection.
 
@@ -88,9 +89,9 @@ The detected bounding-box centroid is back-projected to geographic coordinates a
 
 All four fine-tuned YOLO models substantially outperform the XGBoost structured baseline, confirming that aerial imagery adds decisive signal beyond what registry metadata alone can provide. YOLO11m is the **production model** (highest precision, fewest false positives); YOLO11s is retained for registry cleaning sweeps where recall matters more.
 
-### Phase 2 — Structured Status Validation (ADIP + XGBoost)
+### Phase 2 — Structured Status Validation (ADIP threshold)
 
-For every candidate pad, FAA ADIP structured fields provide authoritative status signals that NAIP imagery cannot: `adip_status` (Operational / Closed / Restricted), `MIL_CODE` (Army / Navy / Air Force / Marines / Coast Guard → excluded from civilian routing), `PRIVATEUSE` (prior coordination required), inspection age, and TLOF/FATO survey records. These fields are mapped at load time in `src/data.py` and used as features in the XGBoost structured classifier (`scripts/train_xgboost.py`), which scores each pad's operational risk independently of any imagery.
+For every candidate pad, FAA ADIP structured fields provide authoritative status signals that NAIP imagery cannot. Phase 2 applies a threshold gate: a pad enters the routing pool if `operational == 1` (ADIP status is Operational) **and** `data_freshness_days ≤ 365` (registry updated within the past year). Pads with `MIL_CODE` set (Army / Navy / Air Force / Marines / Coast Guard) and pads with `PRIVATEUSE` flag are excluded from civilian routing regardless of visual detection result. The XGBoost classifier (`scripts/train_xgboost.py`, F1=0.73) is a research baseline that quantifies how much discriminative signal is available from structured fields alone — it is not called in the live routing pipeline.
 
 The booking flow in `src/agent.py` applies the same flags at runtime: military and private-use helipads generate coordination warnings before a leg is confirmed. Cryptic FAA coordination remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) are decoded to plain English by an LLM call (`_decode_adip_remarks()`) so passengers see actionable arrival instructions, not raw FAA notation.
 
