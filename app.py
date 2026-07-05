@@ -4746,8 +4746,6 @@ def _route_assistant_content() -> None:
     for _msg in st.session_state["agent_messages"]:
         with st.chat_message(_msg["role"]):
             st.markdown(_msg["content"])
-            if _msg.get("route_map_html"):
-                components.html(_msg["route_map_html"], height=340)
 
     # ── Booking leg cards — rendered from session state so they survive reruns ──
     for _bl in st.session_state["_agent_booking_legs"]:
