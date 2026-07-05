@@ -4747,8 +4747,13 @@ def _route_assistant_content() -> None:
         with st.chat_message(_msg["role"]):
             st.markdown(_msg["content"])
 
-    # ── Booking leg cards — rendered from session state so they survive reruns ──
-    for _bl in st.session_state["_agent_booking_legs"]:
+    # ── Booking leg cards — rendered from session state so they survive the booking
+    # rerun. Cleared immediately after rendering so they don't re-appear on
+    # subsequent non-booking queries (restaurant search, weather, etc.).
+    _booking_legs_snapshot = list(st.session_state["_agent_booking_legs"])
+    if _booking_legs_snapshot:
+        st.session_state["_agent_booking_legs"] = []
+    for _bl in _booking_legs_snapshot:
         if _bl["mode"] == "rideshare":
             rs = _bl["rideshare"]
             st.markdown(
