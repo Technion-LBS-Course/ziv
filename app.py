@@ -4627,7 +4627,7 @@ body{{background:transparent;font-family:-apple-system,BlinkMacSystemFont,"Segoe
 .desc{{font-size:14.5px;color:#8badcc;line-height:1.65}}
 .tags{{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}}
 .tag{{background:rgba(0,140,220,.12);border:1px solid rgba(0,140,220,.3);
-  color:#5bc8f5;font-size:12px;padding:4px 11px;border-radius:20px}}
+  color:#5bc8f5;font-size:14px;padding:4px 11px;border-radius:20px}}
 </style></head><body>
 <div class="card">
   <div class="img-wrap" onclick="playAudio()" title="Click to replay introduction">
