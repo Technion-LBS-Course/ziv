@@ -695,6 +695,10 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 
 - [x] METAR per-leg badges + precipitation warnings (done 2026-07-04)
 - [x] OSM helipad address lookup + 8B model recovery + fragment rerun fix (done 2026-07-04)
+- [x] Mia intro card + tab-switch audio (done 2026-07-05)
+- [x] Drive-only time estimate fix — distance-tiered speed (done 2026-07-05)
+- [x] Booking pickup label fix — resolved POI name + address (done 2026-07-05)
+- [x] METAR ICAO lookup fix — pre-resolve FAA ident → ICAO_ID (done 2026-07-05)
 - [ ] `scripts/compare_registry_accuracy.py`
 - [ ] End-to-end demo run: Miles Urban persona, NYC → Greenwich CT, live TFR + weather layers, multimodal route with aerial advantage callout
 - [ ] `Worklog.md` updated with Final session notes
@@ -712,6 +716,38 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 **Why `_recover_tool_use_failed` parses `failed_generation`:** The 8B model does generate the right tool and right arguments — it just uses `<function=compute_route>{"origin":…}` format instead of the OpenAI schema. The `failed_generation` field in the Groq 400 error body contains the exact attempted call. Parsing and re-executing it is more reliable than retrying the model with a modified prompt.
 
 **Why `st.rerun()` only on booking:** Both user and assistant messages are rendered inline during the fragment's current pass (not only from session_state at the top). Only booking leg cards need a second pass because they render from `st.session_state["_agent_booking_legs"]` at the top of the fragment. Guarding the rerun eliminates a ~2-3s grayout on every non-booking query.
+
+### Post-Final fixes (2026-07-05)
+
+| Fix | File | Detail |
+|-----|------|--------|
+| Mia intro card | `app.py` | `_build_mia_card()` — self-contained `components.html()` with base64 PNG + MP3; ResizeObserver triggers audio play on tab reveal; `assets/mia.png` (PIL-resized to 426×426, 255 KB) + `assets/mia_intro.mp3` (116 KB) committed to git |
+| Drive-only time estimate | `src/agent.py` | Distance-tiered speed replaces flat 25 km/h: `<20 km → 30 km/h`, `20–60 km → 55 km/h`, `>60 km → 70 km/h`. Short helipad approach legs (origin→pad_a, pad_b→dest) still use 25 km/h via `_SPEED_DRIVE_KMH`. |
+| Booking pickup/dropoff labels | `src/agent.py` + `app.py` | `_execute_tool()` injects `origin_poi_name`, `origin_address`, `dest_poi_name`, `dest_address` from `_geocode_rich_cache` into the route dict; `run_booking()` uses these for the ground leg `from_name`/`to_name` labels |
+| METAR ICAO lookup | `src/agent.py` | `_icao_for(faa_id)` helper pre-resolves `ICAO_ID` from `faa_adip_df["ICAO_ID"]` before the Phase 1 parallel block; Aviation Weather Center requires ICAO codes (e.g. `KJFK`), not FAA idents (e.g. `NK39`) |
+| Route map conditional | `app.py` | Route map rendered only when `_result` contains a non-error route or booking; prevents the map from appearing on weather/restaurant/general queries |
+| Booking legs snapshot+clear | `app.py` | After rendering, `st.session_state["_agent_booking_legs"]` is snapshot-then-cleared so cards do not re-render on the next non-booking query |
+
+#### Non-obvious decisions
+
+**Mia audio: ResizeObserver vs `window.onload`:** `window.onload` fires when the iframe loads at page startup — before the user has clicked the Route Assistant tab. Browsers block autoplay unless a user gesture immediately preceded the play call. `ResizeObserver` on `document.body` fires when Streamlit changes the parent container's CSS from `display:none` to visible (tab switch), and the tab click is the qualifying user gesture. Pattern:
+```js
+var ro = new ResizeObserver(function(entries) {
+    if (!played && entries[0] && entries[0].contentRect.width > 0) {
+        played = true; ro.disconnect();
+        document.getElementById("mia-a").play().catch(function(){});
+    }
+});
+ro.observe(document.body);
+```
+
+**`components.html()` size limit:** Streamlit Cloud silently fails to render a `components.html()` component whose content exceeds ~2 MB (the base64 string grows ~37% vs raw). `mia.png` was originally 2 MB (1254×1254 px). Fix: PIL-resize to 426×426 before base64-encoding → 255 KB on disk, ~350 KB base64. Always pre-compress images before embedding as data URIs in `components.html()`.
+
+**Distance-tiered drive speed:** The previous flat `25 km/h` urban speed produced `321 min` for a 99 km haversine route (NYC → New Haven), whereas OSRM returns ~112 min. The tiered speeds (`30 / 55 / 70 km/h` for short/medium/long haversine distances) are calibrated so that `haversine × 1.35 road_factor / speed` approximates OSRM times across the NE US trip range. The 25 km/h constant is preserved for short helipad approach legs (2–8 km) where urban crawl applies.
+
+**ICAO vs FAA ident for METAR:** The Aviation Weather Center (`aviationweather.gov/api/data/metar`) indexes stations by ICAO code. Most helipads have only FAA idents (e.g. `NK39`). `faa_adip_df["ICAO_ID"]` has the mapping when it exists. `_icao_for()` falls back to the raw FAA ident so existing helipads that happen to have an ICAO code still get METAR data; helipads without an ICAO code (private, small rooftops) return `None` from `fetch_metar()` which is correctly handled as "no weather data available".
+
+**Booking label `_geocode_rich_cache`:** The cache is keyed by `place_name.lower().strip()` and stores `{poi_name, address}` from TomTom's response. Coordinates flow separately through `geocode_place()` return value — the cache only carries the display strings. `_execute_tool()` reads the cache for both origin and destination immediately after geocoding, then injects the strings into `route["origin_poi_name"]` etc. before calling `compute_skyroute()`. This must happen before `run_booking()` consumes the route dict, not after.
 
 ---
 

@@ -396,6 +396,10 @@ While the loop runs, a collapsible `st.status()` panel shows real-time progress 
 
 The panel collapses automatically when the response is ready.
 
+### Concierge Intro (Mia card)
+
+When the Route Assistant tab is opened, a persona intro card (`_build_mia_card()`) renders as a `components.html()` component with the Mia avatar (`assets/mia.png`) and a short audio greeting (`assets/mia_intro.mp3`). Audio autoplay fires via `ResizeObserver` — the tab-click user gesture qualifies for browser autoplay policy; `window.onload` does not (the iframe loads at page startup, before the user has visited the tab).
+
 ### Booking Flow Detail
 
 When `confirm_booking` fires, `run_booking()` generates structured cards for each leg:
@@ -404,7 +408,9 @@ When `confirm_booking` fires, `run_booking()` generates structured cards for eac
 |----------|---------|-------------|
 | **Walk** | distance < 0.5 km | Walking time (5 km/h) + Mapillary street thumbnail at departure point |
 | **Helicopter** | aerial segment | Departure helipad: METAR badge (VFR/MVFR/IFR/LIFR colour pill + wind/vis/ceiling) + ADIP status + decoded coordination note + Mapillary thumbnail · same for Arrival helipad |
-| **Rideshare** | ground > 0.5 km | Simulated fare estimate + Uber/Waymo deeplinks + Mapillary thumbnails at pickup and dropoff |
+| **Rideshare** | ground > 0.5 km | Resolved pickup/dropoff label (POI name + address from TomTom geocoding) + simulated fare estimate + Uber/Waymo deeplinks + Mapillary thumbnails |
+
+METAR calls use ICAO codes (`ICAO_ID` column from `faa_adip_df`), not FAA idents — Aviation Weather Center requires ICAO. `_icao_for(faa_id)` resolves the mapping before the Phase 1 parallel fetch block; helipads with no ICAO code fall back gracefully to no weather data.
 
 ADIP coordination remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) are decoded to plain English by a separate LLM call (`_decode_adip_remarks()`) using `temperature=0.1` and an abbreviation expansion system prompt. Results are cached in-process by helipad ident.
 
@@ -484,6 +490,10 @@ ADIP coordination remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) are 
 - [x] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges; VFR/MVFR/IFR colour coding
 - [x] Precipitation warning banner — per-waypoint NWS intensity check; `st.warning()` above routing output
 - [x] OSM helipad address lookup, 8B model recovery, fragment rerun fix
+- [x] Mia intro card — concierge persona card with tab-switch audio; `assets/mia.png` + `assets/mia_intro.mp3`
+- [x] Drive-only time estimate fix — distance-tiered speed (30/55/70 km/h) replaces flat 25 km/h
+- [x] Booking pickup/dropoff label — resolved POI name + address from TomTom geocoding
+- [x] METAR ICAO lookup — pre-resolve FAA ident → `ICAO_ID` before Aviation Weather Center call
 - [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
 - [ ] End-to-end demo walkthrough: Miles Urban persona, NYC → Greenwich CT, live TFR + weather, multimodal route with aerial advantage callout
 - [ ] `Worklog.md` updated with Final session notes
@@ -557,7 +567,9 @@ ziv/
 │   ├── helipad_run_yolo11m/weights/best.pt   ← production model
 │   └── helipad_run_rtdetr_l/weights/best.pt
 ├── assets/
-│   └── helipad_grounding_dino.jpg  ← early zero-shot experiment reference image
+│   ├── helipad_grounding_dino.jpg  ← early zero-shot experiment reference image
+│   ├── mia.png                     ← Mia concierge avatar (426×426 px, PIL-compressed from 2 MB original)
+│   └── mia_intro.mp3               ← Mia greeting audio (116 KB); plays on Route Assistant tab open
 ├── data/                   ← Most data files gitignored; exceptions below committed for Cloud
 │   ├── inspector_results.csv          ← committed — pre-computed TP/TN/FP/FN for Inspector tab
 │   └── yolo_dataset/images/test/      ← committed — 747 NAIP test chips (40.5 MB) for Inspector tab
