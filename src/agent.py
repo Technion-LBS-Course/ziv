@@ -1080,6 +1080,11 @@ def _execute_tool(
                     "poi_name": _dest_rich.get("poi_name", ""),
                     "address":  _dest_rich.get("address", ""),
                 }
+                # Inject resolved name+address into route so run_booking() can use them
+                route["origin_poi_name"] = _orig_rich.get("poi_name", "")
+                route["origin_address"]  = _orig_rich.get("address", "")
+                route["dest_poi_name"]   = _dest_rich.get("poi_name", "")
+                route["dest_address"]    = _dest_rich.get("address", "")
 
             # TFR + weather advisory
             advisory_parts = []
@@ -2158,6 +2163,21 @@ def run_booking(route: dict, faa_adip_df=None, progress_callback=None) -> list[d
             from src.notam import fetch_metar as _fetch_metar
             _dep_ident = pad_a.get("ident") or pad_a.get("IDENT") or ""
             _arr_ident = pad_b.get("ident") or pad_b.get("IDENT") or ""
+
+            # Aviation Weather Center uses ICAO codes, not FAA idents.
+            # Look up ICAO_ID from the enriched DataFrame (instant pandas lookup)
+            # so METAR can be fetched in parallel alongside the ADIP call.
+            def _icao_for(faa_id: str) -> str:
+                if not faa_id or faa_adip_df is None:
+                    return ""
+                rows = faa_adip_df[faa_adip_df["IDENT"] == faa_id]
+                if rows.empty:
+                    return ""
+                return str(rows.iloc[0].get("ICAO_ID", "") or "").strip()
+
+            _dep_metar_id = _icao_for(_dep_ident) or _dep_ident
+            _arr_metar_id = _icao_for(_arr_ident) or _arr_ident
+
             with ThreadPoolExecutor(max_workers=8) as ex:
                 f_dep        = ex.submit(lookup_helipad_info,
                                          pad_a.get("ident"), pad_a.get("name"),
@@ -2167,8 +2187,8 @@ def run_booking(route: dict, faa_adip_df=None, progress_callback=None) -> list[d
                                          pad_b["lat"], pad_b["lon"], faa_adip_df)
                 f_mly_a      = ex.submit(find_nearest_mapillary_image, pad_a["lat"], pad_a["lon"])
                 f_mly_b      = ex.submit(find_nearest_mapillary_image, pad_b["lat"], pad_b["lon"])
-                f_metar_dep  = ex.submit(_fetch_metar, _dep_ident) if _dep_ident else None
-                f_metar_arr  = ex.submit(_fetch_metar, _arr_ident) if _arr_ident else None
+                f_metar_dep  = ex.submit(_fetch_metar, _dep_metar_id) if _dep_metar_id else None
+                f_metar_arr  = ex.submit(_fetch_metar, _arr_metar_id) if _arr_metar_id else None
                 # Reverse geocode OSM-only helipads (no FAA ident) to get street address
                 f_rg_dep     = ex.submit(_reverse_geocode_tomtom, pad_a["lat"], pad_a["lon"]) if not _dep_ident else None
                 f_rg_arr     = ex.submit(_reverse_geocode_tomtom, pad_b["lat"], pad_b["lon"]) if not _arr_ident else None
@@ -2222,7 +2242,10 @@ def run_booking(route: dict, faa_adip_df=None, progress_callback=None) -> list[d
                 o = route["origin"]
                 pickup_lat, pickup_lon = o["lat"], o["lon"]
                 dropoff_lat, dropoff_lon = pad["lat"], pad["lon"]
-                _origin_label = route.get("origin_name") or "Your origin"
+                _orig_poi  = route.get("origin_poi_name", "")
+                _orig_addr = route.get("origin_address", "")
+                _orig_raw  = route.get("origin_name") or "Your origin"
+                _origin_label = (_orig_poi or _orig_raw) + (f"  \n{_orig_addr}" if _orig_addr else "")
                 from_name = f"Origin: {_origin_label}"
                 to_name   = pad.get("name") or pad.get("ident") or leg["to"]
             else:
@@ -2231,7 +2254,10 @@ def run_booking(route: dict, faa_adip_df=None, progress_callback=None) -> list[d
                 pickup_lat, pickup_lon = pad["lat"], pad["lon"]
                 dropoff_lat, dropoff_lon = d["lat"], d["lon"]
                 from_name = pad.get("name") or pad.get("ident") or leg["from"]
-                _dest_label = route.get("dest_name") or "Your destination"
+                _dest_poi  = route.get("dest_poi_name", "")
+                _dest_addr = route.get("dest_address", "")
+                _dest_raw  = route.get("dest_name") or "Your destination"
+                _dest_label = (_dest_poi or _dest_raw) + (f"  \n{_dest_addr}" if _dest_addr else "")
                 to_name   = f"Destination: {_dest_label}"
 
             _mode_icon = "🚶" if leg["mode"] == "walk" else "🚗"
