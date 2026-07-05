@@ -4621,11 +4621,11 @@ body{{background:transparent;font-family:-apple-system,BlinkMacSystemFont,"Segoe
   background:rgba(0,150,255,.85);border-radius:50%;display:flex;align-items:center;
   justify-content:center;font-size:14px;color:#fff;transition:transform .15s,background .15s}}
 .img-wrap:hover .play-btn{{transform:scale(1.15);background:rgba(0,180,255,1)}}
-.info{{flex:1;padding-top:2px}}
+.info{{flex:1;padding-top:2px;display:flex;flex-direction:column;height:213px}}
 .name{{font-size:30px;font-weight:700;color:#fff;letter-spacing:.3px;margin-bottom:4px}}
 .title{{font-size:16px;color:#00b4ff;text-transform:uppercase;letter-spacing:1.8px;margin-bottom:12px}}
 .desc{{font-size:18px;color:#8badcc;line-height:1.65}}
-.tags{{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}}
+.tags{{display:flex;flex-wrap:wrap;gap:8px;margin-top:auto}}
 .tag{{background:rgba(0,140,220,.12);border:1px solid rgba(0,140,220,.3);
   color:#5bc8f5;font-size:17px;padding:5px 14px;border-radius:20px}}
 </style></head><body>
