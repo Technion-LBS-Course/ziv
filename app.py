@@ -6,6 +6,7 @@ Run:
 
 # Windows: numpy / PyTorch / XGBoost each ship libiomp5md.dll → OMP Error #15.
 # Must be set before any of those libraries are imported.
+import base64
 import math
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -4567,6 +4568,94 @@ L.marker([LAT, LON], {{icon:dot}}).addTo(leafMap);
 # TAB 7 · Route Assistant — LLM-powered natural language routing (M4)
 # ══════════════════════════════════════════════════════════════════════════════
 
+_MIA_IMG   = ASSETS_DIR / "mia.png"
+_MIA_AUDIO = ASSETS_DIR / "mia_intro.mp3"
+
+
+def _build_mia_card(autoplay: bool = False) -> str:
+    """Return a self-contained HTML card for the Mia intro panel.
+
+    Embeds image and audio as base64 data URIs so the component is
+    fully self-contained inside Streamlit's sandboxed iframe.
+    Clicking the image replays the intro audio.
+    """
+    img_src = ""
+    if _MIA_IMG.exists():
+        img_src = "data:image/png;base64," + base64.b64encode(_MIA_IMG.read_bytes()).decode()
+
+    audio_src = ""
+    if _MIA_AUDIO.exists():
+        audio_src = "data:audio/mpeg;base64," + base64.b64encode(_MIA_AUDIO.read_bytes()).decode()
+
+    autoplay_js = (
+        'window.addEventListener("load",function(){'
+        'setTimeout(function(){var a=document.getElementById("mia-a");if(a){a.play().catch(function(){});}},250);'
+        '});'
+    ) if (autoplay and audio_src) else ""
+
+    img_html = (
+        f'<img src="{img_src}" alt="Mia">'
+        if img_src
+        else '<div style="width:130px;height:130px;background:#0d2040;border-radius:12px;'
+             'display:flex;align-items:center;justify-content:center;color:#3a6fa0;font-size:36px">🤖</div>'
+    )
+    play_btn  = '<div class="play-btn" title="Replay introduction">▶</div>' if audio_src else ""
+    audio_tag = f'<audio id="mia-a" src="{audio_src}"></audio>' if audio_src else ""
+
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:transparent;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+.card{{display:flex;align-items:flex-start;gap:18px;
+  background:linear-gradient(135deg,#060c18 0%,#0b1628 60%,#0a1220 100%);
+  border:1px solid rgba(0,140,220,.35);border-radius:14px;padding:18px;
+  position:relative;overflow:hidden}}
+.card::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent 0%,#00aaff 50%,transparent 100%)}}
+.img-wrap{{position:relative;flex-shrink:0;cursor:pointer;user-select:none}}
+.img-wrap img{{width:130px;height:130px;object-fit:cover;border-radius:12px;
+  border:1.5px solid rgba(0,150,255,.5);box-shadow:0 0 18px rgba(0,150,255,.25);
+  display:block;transition:box-shadow .25s}}
+.img-wrap:hover img{{box-shadow:0 0 30px rgba(0,170,255,.6)}}
+.play-btn{{position:absolute;bottom:7px;right:7px;width:26px;height:26px;
+  background:rgba(0,150,255,.85);border-radius:50%;display:flex;align-items:center;
+  justify-content:center;font-size:11px;color:#fff;transition:transform .15s,background .15s}}
+.img-wrap:hover .play-btn{{transform:scale(1.15);background:rgba(0,180,255,1)}}
+.info{{flex:1;padding-top:2px}}
+.name{{font-size:20px;font-weight:700;color:#fff;letter-spacing:.3px;margin-bottom:3px}}
+.title{{font-size:11px;color:#00b4ff;text-transform:uppercase;letter-spacing:1.8px;margin-bottom:10px}}
+.desc{{font-size:12.5px;color:#8badcc;line-height:1.65}}
+.tags{{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}}
+.tag{{background:rgba(0,140,220,.12);border:1px solid rgba(0,140,220,.3);
+  color:#5bc8f5;font-size:10.5px;padding:3px 9px;border-radius:20px}}
+</style></head><body>
+<div class="card">
+  <div class="img-wrap" onclick="playAudio()" title="Click to replay introduction">
+    {img_html}{play_btn}
+  </div>
+  <div class="info">
+    <div class="name">Mia</div>
+    <div class="title">Mobility Intelligence Assistant</div>
+    <div class="desc">I plan your door-to-door air mobility routes across New York metro —
+      combining helicopter, eVTOL, and ground transport into a single booking.
+      Tell me your destination.</div>
+    <div class="tags">
+      <span class="tag">✈ Aerial routing</span>
+      <span class="tag">🚗 Ground legs</span>
+      <span class="tag">📍 POI search</span>
+      <span class="tag">🌤 Live weather</span>
+      <span class="tag">📋 Helipad status</span>
+    </div>
+  </div>
+  {audio_tag}
+</div>
+<script>
+function playAudio(){{var a=document.getElementById('mia-a');if(a){{a.currentTime=0;a.play().catch(function(){{}});}}}}
+{autoplay_js}
+</script>
+</body></html>"""
+
+
 def _metar_badge(metar: dict | None) -> str:
     """Return an HTML METAR badge string for inline rendering.
 
@@ -4597,12 +4686,10 @@ def _route_assistant_content() -> None:
     Isolating this tab prevents chat messages and spinner reruns from
     rebuilding the EDA maps, hotspot maps, and routing simulator HTML.
     """
-    st.markdown("### 💬 Route Assistant")
-    st.caption(
-        "Describe where you need to go in plain English — the assistant plans your "
-        "SkyRoute itinerary. When you confirm booking, it looks up helipad coordination "
-        "details and arranges your ground legs via Uber / Waymo."
-    )
+    _first_visit = "_mia_intro_played" not in st.session_state
+    if _first_visit:
+        st.session_state["_mia_intro_played"] = True
+    components.html(_build_mia_card(autoplay=_first_visit), height=188, scrolling=False)
 
     # ── Helipad pool + FAA ADIP data ──────────────────────────────────────────
     if "_agent_helipads" not in st.session_state:
