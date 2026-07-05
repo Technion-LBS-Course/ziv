@@ -4637,7 +4637,7 @@ body{{background:transparent;font-family:-apple-system,BlinkMacSystemFont,"Segoe
     <div class="name">Mia</div>
     <div class="title">Mobility Intelligence Assistant</div>
     <div class="desc">I plan your door-to-door air mobility routes across New York metro —
-      combining helicopter, eVTOL, and ground transport into a single booking.
+      combining aerial and ground transport into a single booking.
       Tell me your destination.</div>
     <div class="tags">
       <span class="tag">✈ Aerial routing</span>
