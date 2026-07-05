@@ -4596,7 +4596,7 @@ def _build_mia_card(autoplay: bool = False) -> str:
     img_html = (
         f'<img src="{img_src}" alt="Mia">'
         if img_src
-        else '<div style="width:170px;height:170px;background:#0d2040;border-radius:12px;'
+        else '<div style="width:213px;height:213px;background:#0d2040;border-radius:12px;'
              'display:flex;align-items:center;justify-content:center;color:#3a6fa0;font-size:36px">🤖</div>'
     )
     play_btn  = '<div class="play-btn" title="Replay introduction">▶</div>' if audio_src else ""
@@ -4606,28 +4606,28 @@ def _build_mia_card(autoplay: bool = False) -> str:
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{background:transparent;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
-.card{{display:flex;align-items:flex-start;gap:18px;
+.card{{display:flex;align-items:flex-start;gap:23px;
   background:linear-gradient(135deg,#060c18 0%,#0b1628 60%,#0a1220 100%);
-  border:1px solid rgba(0,140,220,.35);border-radius:14px;padding:18px;
+  border:1px solid rgba(0,140,220,.35);border-radius:14px;padding:23px;
   position:relative;overflow:hidden}}
 .card::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;
   background:linear-gradient(90deg,transparent 0%,#00aaff 50%,transparent 100%)}}
 .img-wrap{{position:relative;flex-shrink:0;cursor:pointer;user-select:none}}
-.img-wrap img{{width:170px;height:170px;object-fit:cover;border-radius:12px;
+.img-wrap img{{width:213px;height:213px;object-fit:cover;border-radius:12px;
   border:1.5px solid rgba(0,150,255,.5);box-shadow:0 0 18px rgba(0,150,255,.25);
   display:block;transition:box-shadow .25s}}
 .img-wrap:hover img{{box-shadow:0 0 30px rgba(0,170,255,.6)}}
-.play-btn{{position:absolute;bottom:7px;right:7px;width:26px;height:26px;
+.play-btn{{position:absolute;bottom:9px;right:9px;width:33px;height:33px;
   background:rgba(0,150,255,.85);border-radius:50%;display:flex;align-items:center;
-  justify-content:center;font-size:11px;color:#fff;transition:transform .15s,background .15s}}
+  justify-content:center;font-size:14px;color:#fff;transition:transform .15s,background .15s}}
 .img-wrap:hover .play-btn{{transform:scale(1.15);background:rgba(0,180,255,1)}}
 .info{{flex:1;padding-top:2px}}
-.name{{font-size:24px;font-weight:700;color:#fff;letter-spacing:.3px;margin-bottom:3px}}
-.title{{font-size:13px;color:#00b4ff;text-transform:uppercase;letter-spacing:1.8px;margin-bottom:10px}}
-.desc{{font-size:14.5px;color:#8badcc;line-height:1.65}}
-.tags{{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}}
+.name{{font-size:30px;font-weight:700;color:#fff;letter-spacing:.3px;margin-bottom:4px}}
+.title{{font-size:16px;color:#00b4ff;text-transform:uppercase;letter-spacing:1.8px;margin-bottom:12px}}
+.desc{{font-size:18px;color:#8badcc;line-height:1.65}}
+.tags{{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}}
 .tag{{background:rgba(0,140,220,.12);border:1px solid rgba(0,140,220,.3);
-  color:#5bc8f5;font-size:14px;padding:4px 11px;border-radius:20px}}
+  color:#5bc8f5;font-size:17px;padding:5px 14px;border-radius:20px}}
 </style></head><body>
 <div class="card">
   <div class="img-wrap" onclick="playAudio()" title="Click to replay introduction">
@@ -4689,7 +4689,7 @@ def _route_assistant_content() -> None:
     _first_visit = "_mia_intro_played" not in st.session_state
     if _first_visit:
         st.session_state["_mia_intro_played"] = True
-    components.html(_build_mia_card(autoplay=_first_visit), height=225, scrolling=False)
+    components.html(_build_mia_card(autoplay=_first_visit), height=282, scrolling=False)
 
     # ── Helipad pool + FAA ADIP data ──────────────────────────────────────────
     if "_agent_helipads" not in st.session_state:
