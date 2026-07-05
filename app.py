@@ -4876,7 +4876,6 @@ def _route_assistant_content() -> None:
         for _ei, (_ec, _ex) in enumerate(zip(_ex_cols, _examples)):
             if _ec.button(_ex, key=f"ex_{_ei}"):
                 st.session_state["_agent_pending_input"] = _ex
-                st.rerun()
 
     # ── Chat input ────────────────────────────────────────────────────────────
     _user_input = (
