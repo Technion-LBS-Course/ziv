@@ -4572,12 +4572,14 @@ _MIA_IMG   = ASSETS_DIR / "mia.png"
 _MIA_AUDIO = ASSETS_DIR / "mia_intro.mp3"
 
 
-def _build_mia_card(autoplay: bool = False) -> str:
+def _build_mia_card() -> str:
     """Return a self-contained HTML card for the Mia intro panel.
 
     Embeds image and audio as base64 data URIs so the component is
     fully self-contained inside Streamlit's sandboxed iframe.
-    Clicking the image replays the intro audio.
+    Audio auto-plays when the tab is first revealed (ResizeObserver detects
+    the display:none → visible transition caused by the tab click).
+    Clicking the image replays the audio.
     """
     img_src = ""
     if _MIA_IMG.exists():
@@ -4587,11 +4589,21 @@ def _build_mia_card(autoplay: bool = False) -> str:
     if _MIA_AUDIO.exists():
         audio_src = "data:audio/mpeg;base64," + base64.b64encode(_MIA_AUDIO.read_bytes()).decode()
 
+    # ResizeObserver fires when the Streamlit tab transitions from display:none → visible.
+    # The tab click is the user gesture, so the browser allows audio playback.
+    # Disconnects after first play so audio only plays once per page load.
     autoplay_js = (
-        'window.addEventListener("load",function(){'
-        'setTimeout(function(){var a=document.getElementById("mia-a");if(a){a.play().catch(function(){});}},250);'
-        '});'
-    ) if (autoplay and audio_src) else ""
+        '(function(){'
+        'var played=false;'
+        'var ro=new ResizeObserver(function(entries){'
+        'if(!played&&entries[0]&&entries[0].contentRect.width>0){'
+        'played=true;ro.disconnect();'
+        'var a=document.getElementById("mia-a");'
+        'if(a){a.play().catch(function(){});}'
+        '}});'
+        'ro.observe(document.body);'
+        '})();'
+    ) if audio_src else ""
 
     img_html = (
         f'<img src="{img_src}" alt="Mia">'
@@ -4686,10 +4698,7 @@ def _route_assistant_content() -> None:
     Isolating this tab prevents chat messages and spinner reruns from
     rebuilding the EDA maps, hotspot maps, and routing simulator HTML.
     """
-    _first_visit = "_mia_intro_played" not in st.session_state
-    if _first_visit:
-        st.session_state["_mia_intro_played"] = True
-    components.html(_build_mia_card(autoplay=_first_visit), height=282, scrolling=False)
+    components.html(_build_mia_card(), height=282, scrolling=False)
 
     # ── Helipad pool + FAA ADIP data ──────────────────────────────────────────
     if "_agent_helipads" not in st.session_state:

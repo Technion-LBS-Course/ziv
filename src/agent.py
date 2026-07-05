@@ -1274,9 +1274,16 @@ def compute_skyroute(
 
     total_min = t_to_a + t_flight + t_from_b
 
-    # Drive-only comparison (haversine × road factor at urban speed)
-    drive_only_min = (_haversine_km(origin_lat, origin_lon, dest_lat, dest_lon)
-                      * _ROAD_FACTOR / _SPEED_DRIVE_KMH * 60)
+    # Drive-only comparison — distance-tiered speed matches real highway/suburban driving
+    # (ground approach legs above stay at _SPEED_DRIVE_KMH=25 km/h; those are short urban hops)
+    _d_total_km = _haversine_km(origin_lat, origin_lon, dest_lat, dest_lon)
+    if _d_total_km < 20:
+        _cmp_speed = 30.0   # dense urban
+    elif _d_total_km < 60:
+        _cmp_speed = 55.0   # suburban / mixed
+    else:
+        _cmp_speed = 70.0   # highway
+    drive_only_min = _d_total_km * _ROAD_FACTOR / _cmp_speed * 60
     time_saved_min = max(0.0, drive_only_min - total_min)
 
     # Work backwards from arrival deadline
