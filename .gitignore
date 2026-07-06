@@ -20,8 +20,9 @@ data/*.json
 data/*.geojson
 data/*.xlsx
 data/adip_raw/
-# inspector_results.csv and test chips are committed for Streamlit Cloud deployment
+# inspector_results.csv, osm_validated.csv, and test chips committed for Streamlit Cloud
 !data/inspector_results.csv
+!data/osm_validated.csv
 # YOLO dataset — large image tiles never commit (train/val); test chips committed for cloud Inspector
 data/yolo_dataset/images/train/
 data/yolo_dataset/images/val/
