@@ -1,4 +1,4 @@
-# CLAUDE.md
+﻿# CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -689,6 +689,13 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 
 - [x] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges; VFR/MVFR/IFR colour coding (done 2026-07-04)
 - [x] Precipitation warning banner — NWS per-waypoint intensity check; `st.warning()` banner when intensity > mode threshold (done 2026-07-04)
+- [x] Weather card raw-cache + unit toggle fix — `_render_weather_card()`; NWS cache stores imperial raw; `_format_weather()` converts at read time (done 2026-07-11)
+- [x] POI card Yelp enrichment — `_yelp_enrich()`, parallel `ThreadPoolExecutor`, star rating/price/Yelp link; TomTom `openingHours` added (done 2026-07-11)
+- [x] `location_hint` injected into LLM system prompt for follow-up place/weather queries (done 2026-07-11)
+- [x] `_naip_chip_b64` live NAIP fallback + 280px resolution — fetches USDA APFO when chip not on disk (done 2026-07-11)
+- [x] Walk leg dropoff Mapillary fields + 2-column detailed itinerary (start + destination side-by-side) (done 2026-07-11)
+- [x] Itinerary height fix — 225px per helicopter leg, 150px bottom buffer (done 2026-07-11)
+- [x] URL protocol guard — TomTom/Yelp protocol-less URLs prepended with `https://` (done 2026-07-11)
 - [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
 
 ### Final milestone checklist (21 Jul 2026 — Demo Day)
@@ -699,6 +706,12 @@ Runs the trained YOLO cascade on NE US OSM helipads that have no FAA counterpart
 - [x] Drive-only time estimate fix — distance-tiered speed (done 2026-07-05)
 - [x] Booking pickup label fix — resolved POI name + address (done 2026-07-05)
 - [x] METAR ICAO lookup fix — pre-resolve FAA ident → ICAO_ID (done 2026-07-05)
+- [x] Weather card unit-toggle fix + raw NWS cache (done 2026-07-11)
+- [x] Yelp Fusion enrichment for POI cards + parallel enrichment + price/rating display (done 2026-07-11)
+- [x] `location_hint` in `run_agent_v2` — last route origin injected into LLM context (done 2026-07-11)
+- [x] `_naip_chip_b64` live NAIP fallback + 280px chip resolution (done 2026-07-11)
+- [x] Walk leg dropoff Mapillary + 2-column detailed itinerary view (done 2026-07-11)
+- [x] Itinerary height formula fix (done 2026-07-11)
 - [ ] `scripts/compare_registry_accuracy.py`
 - [ ] End-to-end demo run: Miles Urban persona, NYC → Greenwich CT, live TFR + weather layers, multimodal route with aerial advantage callout
 - [ ] `Worklog.md` updated with Final session notes
@@ -748,6 +761,28 @@ ro.observe(document.body);
 **ICAO vs FAA ident for METAR:** The Aviation Weather Center (`aviationweather.gov/api/data/metar`) indexes stations by ICAO code. Most helipads have only FAA idents (e.g. `NK39`). `faa_adip_df["ICAO_ID"]` has the mapping when it exists. `_icao_for()` falls back to the raw FAA ident so existing helipads that happen to have an ICAO code still get METAR data; helipads without an ICAO code (private, small rooftops) return `None` from `fetch_metar()` which is correctly handled as "no weather data available".
 
 **Booking label `_geocode_rich_cache`:** The cache is keyed by `place_name.lower().strip()` and stores `{poi_name, address}` from TomTom's response. Coordinates flow separately through `geocode_place()` return value — the cache only carries the display strings. `_execute_tool()` reads the cache for both origin and destination immediately after geocoding, then injects the strings into `route["origin_poi_name"]` etc. before calling `compute_skyroute()`. This must happen before `run_booking()` consumes the route dict, not after.
+
+### v5.0 Post-M4 fixes (2026-07-11)
+
+| Fix | File | Detail |
+|-----|------|--------|
+| Weather card raw NWS cache | `app.py` | `_nws_cache` stores imperial raw dict (`temperature_f`, `temperature_c`, `wind_raw`, `periods_raw`); `_format_weather(raw, metric, units)` converts at read time — fixes unit-toggle returning wrong temperature on cache hit |
+| POI card Yelp enrichment | `src/agent.py` + `app.py` | `_yelp_enrich(name, lat, lon)` calls Yelp Fusion `/v3/businesses/search`; `_yelp_cache` keyed by `(name_lower, lat4, lon4)`; parallel fetch via `ThreadPoolExecutor`; `_render_places_card()` shows star rating, review count, price pill, Yelp link; TomTom `openingHours=nextSevenDays` added for today's hours |
+| URL protocol guard | `src/agent.py` + `app.py` | TomTom and Yelp return protocol-less URLs (`www.example.com`); prepend `https://` when not starting with `http://` or `https://` |
+| `location_hint` injection | `src/agent.py` | `run_agent_v2(location_hint=...)` appends last route origin/destination to `_CONCIERGE_SYSTEM` prompt; follow-up place/weather queries default to last known area |
+| `_naip_chip_b64` live fallback | `app.py` | When chip file not on disk and `lat`/`lon` provided, calls `fetch_naip_chip(lat, lon)` from `src.hie`; result cached by Streamlit; resolution raised from 100×100 to 280×280 px |
+| Walk leg dropoff Mapillary | `src/agent.py` + `app.py` | `run_booking()` stores `dropoff_mly_id`/`dropoff_mly_thumb` in walk leg dict; detailed itinerary shows 2-column layout (start left, destination right) |
+| Itinerary height formula | `app.py` | `_per_leg_h`: 225 px per helicopter leg (was 165), 118 px per ground leg; bottom buffer 150 px (was 110); POI card per-row dynamic height with Yelp/hours rows |
+
+#### Non-obvious decisions
+
+**Yelp parallel enrichment:** `ThreadPoolExecutor(max_workers=len(base))` runs all Yelp calls concurrently; total latency ≈ slowest single call (~1–3 s) instead of N×5 s sequential. Worker count is bounded by the result set size (default TomTom limit 5).
+
+**NWS raw cache:** The previous cache stored already-converted strings, so switching from Fahrenheit to Celsius on a cache hit returned the original unit. Fix: always cache the raw imperial values; `_format_weather(raw, metric, units)` converts at call time. The cache key is `(lat4, lon4)` only — units are not part of the key.
+
+**`_naip_chip_b64` cache with lat/lon args:** `@st.cache_data` uses all non-underscore parameters as cache key. Adding `lat` and `lon` as named parameters (not prefixed with `_`) means the live-fetch result is cached per location — subsequent renders of the same helipad are instant. Raising resolution to 280 px costs ~5 KB per chip in Streamlit's cache (negligible).
+
+**Walk leg 2-column layout:** The previous walk detailed itinerary showed a single Mapillary card for the pickup (helipad), which confused users expecting to see the destination. The 2-column layout (`st.columns(2)`) shows start on the left and destination on the right, matching the itinerary summary card's directional flow.
 
 ---
 

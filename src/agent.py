@@ -231,7 +231,15 @@ TOOL_SCHEMAS: list[dict] = [
                     "location": {
                         "type": "string",
                         "description": "City, address, or landmark, e.g. 'Greenwich CT' or '30th St Heliport NYC'",
-                    }
+                    },
+                    "units": {
+                        "type": "string",
+                        "enum": ["imperial", "metric"],
+                        "description": (
+                            "Unit system for the response. Use 'metric' when the user asks "
+                            "for Celsius, km/h, m/s, or any SI units. Default 'imperial' (°F, mph)."
+                        ),
+                    },
                 },
                 "required": ["location"],
             },
@@ -314,7 +322,9 @@ def _get_groq_client():
         log.warning("GROQ_API_KEY not set — Route Assistant will use fallback text")
         return None
 
-    return Groq(api_key=key)
+    # timeout=30 prevents a 600s freeze during demos.
+    # max_retries=2 (SDK default) uses the Groq retry-after header on 429s.
+    return Groq(api_key=key, timeout=30.0)
 
 
 # ── Step 2: Parameter extraction ─────────────────────────────────────────────
@@ -632,6 +642,7 @@ _nws_gridpoint_cache: dict = {} # key: "lat2,lon2" → forecast_url (permanent �
 _geocode_cache: dict = {}       # key: place_name.lower().strip() → (lat, lon) | None
 _geocode_rich_cache: dict = {}  # key: place_name.lower().strip() → {poi_name, address}
 _poi_cache: dict = {}           # key: (location, category, radius_m) → result_dict
+_yelp_cache: dict = {}          # key: (name_lower, lat4, lon4) → enrichment dict
 
 # TomTom structured category codes — hard-filter results so keyword drift can't pull
 # in off-category businesses (e.g. liquor stores for "fine dining").
@@ -678,6 +689,52 @@ _TOMTOM_CATEGORY_MAP: dict[str, int] = {
 }
 
 
+def _yelp_enrich(name: str, lat: float, lon: float) -> dict:
+    """Return Yelp rating/price/review_count for a business by name + coordinates.
+
+    Returns an empty dict when YELP_API_KEY is absent or the lookup fails —
+    callers must treat all keys as optional.
+
+    Args:
+        name: Business name as returned by TomTom.
+        lat: Latitude of the business.
+        lon: Longitude of the business.
+
+    Returns:
+        Dict with keys: rating (float), review_count (int), price (str "$$"),
+        yelp_url (str). Empty dict on failure.
+    """
+    api_key = os.getenv("YELP_API_KEY", "")
+    if not api_key:
+        return {}
+    cache_k = (name.lower().strip(), round(lat, 4), round(lon, 4))
+    if cache_k in _yelp_cache:
+        return _yelp_cache[cache_k]
+    try:
+        resp = requests.get(
+            "https://api.yelp.com/v3/businesses/search",
+            headers={"Authorization": f"Bearer {api_key}"},
+            params={"term": name, "latitude": lat, "longitude": lon, "limit": 1},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        biz = (resp.json().get("businesses") or [None])[0]
+        out = (
+            {
+                "rating":       biz.get("rating"),
+                "review_count": biz.get("review_count"),
+                "price":        biz.get("price", ""),
+                "yelp_url":     biz.get("url", ""),
+            }
+            if biz else {}
+        )
+    except Exception as exc:
+        log.debug("Yelp enrich failed for '%s': %s", name, exc)
+        out = {}
+    _yelp_cache[cache_k] = out
+    return out
+
+
 def _tool_search_places(location: str, category: str, radius_m: int = 500) -> dict:
     """Search for POIs near a location using TomTom Search API.
 
@@ -710,7 +767,8 @@ def _tool_search_places(location: str, category: str, radius_m: int = 500) -> di
         f"{_urlparse.quote(category)}.json"
     )
     params: dict = {"key": key, "lat": lat, "lon": lon,
-                    "radius": radius_m, "limit": 5}
+                    "radius": radius_m, "limit": 5,
+                    "openingHours": "nextSevenDays"}
     if category_code:
         params["categorySet"] = category_code
     try:
@@ -729,31 +787,116 @@ def _tool_search_places(location: str, category: str, radius_m: int = 500) -> di
         _poi_cache[poi_key] = out
         return out
 
-    results = []
+    import datetime as _dt
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    _today = _dt.datetime.utcnow().date().isoformat()
+
+    def _hours_today(poi: dict) -> str:
+        oh = poi.get("openingHours", {})
+        for tr in oh.get("timeRanges", []):
+            if tr.get("startTime", {}).get("date") == _today:
+                s, e = tr["startTime"], tr["endTime"]
+                def _fmt(h: int, m: int) -> str:
+                    period = "AM" if h < 12 else "PM"
+                    return f"{h % 12 or 12}:{m:02d} {period}"
+                return f"{_fmt(s['hour'], s['minute'])} – {_fmt(e['hour'], e['minute'])}"
+        return ""
+
+    # Build base results with TomTom data; keep position coords for Yelp lookup
+    base: list[dict] = []
     for item in items[:5]:
-        poi = item.get("poi", {})
+        poi  = item.get("poi", {})
         addr = item.get("address", {})
-        results.append({
-            "name": poi.get("name", "Unknown"),
-            "address": addr.get("freeformAddress", ""),
+        pos  = item.get("position", {})
+        base.append({
+            "name":       poi.get("name", "Unknown"),
+            "address":    addr.get("freeformAddress", ""),
             "distance_m": round(item.get("dist", 0)),
-            "phone": poi.get("phone", ""),
-            "url": poi.get("url", ""),
+            "phone":      poi.get("phone", ""),
+            "url":        poi.get("url", ""),
+            "hours_today": _hours_today(poi),
+            "_lat": pos.get("lat", lat),
+            "_lon": pos.get("lon", lon),
         })
+
+    # Enrich with Yelp in parallel — all calls run concurrently
+    def _enrich(r: dict) -> dict:
+        return _yelp_enrich(r["name"], r["_lat"], r["_lon"])
+
+    with _TPE(max_workers=len(base)) as pool:
+        yelp_data = list(pool.map(_enrich, base))
+
+    results = []
+    for r, yelp in zip(base, yelp_data):
+        r.pop("_lat"); r.pop("_lon")
+        results.append({**r, **yelp})
+
     out = {"location": location, "category": category, "results": results}
     _poi_cache[poi_key] = out
     return out
 
 
-def _tool_get_weather(location: str) -> dict:
+def _tool_get_weather(location: str, units: str = "imperial") -> dict:
     """Get NWS Point Forecast for a location (CONUS only, no API key).
 
     Args:
         location: City, address, or landmark.
+        units: 'imperial' (°F, mph) or 'metric' (°C, m/s).
 
     Returns:
         Dict with conditions/temperature/wind/precip_chance or 'error' key.
     """
+    import re as _re
+
+    def _mph_to_ms(wind_str: str) -> str:
+        m = _re.match(r"([\d.]+)\s*mph(.*)", wind_str, _re.IGNORECASE)
+        if not m:
+            return wind_str
+        return f"{round(float(m.group(1)) * 0.44704, 1)} m/s{m.group(2)}"
+
+    def _format_weather(raw: dict, metric: bool, units_str: str) -> dict:
+        """Convert a cached raw-imperial NWS dict to the requested unit system."""
+        if metric:
+            disp_temp  = raw["temperature_c"]
+            disp_wind  = _mph_to_ms(raw["wind_raw"])
+            temp_label = "°C"
+            wind_label = "m/s"
+        else:
+            disp_temp  = raw["temperature_f"]
+            disp_wind  = raw["wind_raw"]
+            temp_label = "°F"
+            wind_label = "mph"
+
+        periods = []
+        for p in raw.get("periods_raw", []):
+            pf = p["temperature_f"]
+            periods.append({
+                "name":          p["name"],
+                "conditions":    p["conditions"],
+                "temperature_f": pf,
+                "temperature_c": round((pf - 32) * 5 / 9, 1),
+                "wind":          _mph_to_ms(p["wind_raw"]) if metric else p["wind_raw"],
+                "precip_chance": p["precip_chance"],
+                "is_daytime":    p["is_daytime"],
+            })
+
+        return {
+            "location":      raw["location"],
+            "period":        raw["period"],
+            "conditions":    raw["conditions"],
+            "temperature_f": raw["temperature_f"],
+            "temperature_c": raw["temperature_c"],
+            "wind":          disp_wind,
+            "precip_chance": raw["precip_chance"],
+            "detailed":      raw["detailed"],
+            "periods":       periods,
+            "units":         units_str,
+            "temp_label":    temp_label,
+            "wind_label":    wind_label,
+        }
+
+    metric = (units == "metric")
     coords = geocode_place(location)
     if coords is None:
         return {"error": f"Could not locate '{location}'"}
@@ -766,9 +909,9 @@ def _tool_get_weather(location: str) -> dict:
     cache_key = f"{lat:.2f},{lon:.2f}"
     cached = _nws_cache.get(cache_key)
     if cached:
-        data, fetched_at = cached
+        raw, fetched_at = cached
         if (_dt.datetime.utcnow() - fetched_at).total_seconds() < _NWS_TTL_S:
-            return data
+            return _format_weather(raw, metric, units)   # always convert on read
 
     headers = {"User-Agent": "SkyRoute/1.0 (zivg@campus.technion.ac.il)"}
     try:
@@ -786,7 +929,8 @@ def _tool_get_weather(location: str) -> dict:
         # Step 2: fetch forecast (always fresh — expires after TTL)
         r2 = requests.get(forecast_url, headers=headers, timeout=8)
         r2.raise_for_status()
-        period = r2.json()["properties"]["periods"][0]
+        all_periods = r2.json()["properties"]["periods"]
+        period = all_periods[0]
     except Exception as exc:
         log.warning("NWS weather fetch failed for %s: %s", location, exc)
         return {"error": "NWS weather service unavailable — try again shortly"}
@@ -797,20 +941,38 @@ def _tool_get_weather(location: str) -> dict:
     except (TypeError, ValueError):
         pass
 
-    temp_f = period.get("temperature", 0)
-    temp_c = round((temp_f - 32) * 5 / 9, 1)
-    result = {
-        "location": location,
-        "period": period.get("name", "Now"),
-        "conditions": period.get("shortForecast", ""),
+    def _raw_period(p: dict) -> dict:
+        pp = 0
+        try:
+            pp = int(p.get("probabilityOfPrecipitation", {}).get("value") or 0)
+        except (TypeError, ValueError):
+            pass
+        return {
+            "name":          p.get("name", ""),
+            "conditions":    p.get("shortForecast", ""),
+            "temperature_f": p.get("temperature", 0),
+            "wind_raw":      f"{p.get('windSpeed', '')} {p.get('windDirection', '')}".strip(),
+            "precip_chance": pp,
+            "is_daytime":    bool(p.get("isDaytime", True)),
+        }
+
+    temp_f   = period.get("temperature", 0)
+    raw_wind = f"{period.get('windSpeed', '')} {period.get('windDirection', '')}".strip()
+
+    # Cache always stores raw imperial — unit conversion happens at read time
+    raw = {
+        "location":      location,
+        "period":        period.get("name", "Now"),
+        "conditions":    period.get("shortForecast", ""),
         "temperature_f": temp_f,
-        "temperature_c": temp_c,
-        "wind": f"{period.get('windSpeed', '')} {period.get('windDirection', '')}".strip(),
+        "temperature_c": round((temp_f - 32) * 5 / 9, 1),
+        "wind_raw":      raw_wind,
         "precip_chance": precip,
-        "detailed": (period.get("detailedForecast", "") or "")[:250],
+        "detailed":      (period.get("detailedForecast", "") or "")[:300],
+        "periods_raw":   [_raw_period(p) for p in all_periods[:4]],
     }
-    _nws_cache[cache_key] = (result, _dt.datetime.utcnow())
-    return result
+    _nws_cache[cache_key] = (raw, _dt.datetime.utcnow())
+    return _format_weather(raw, metric, units)
 
 
 # ── TFR segment check ─────────────────────────────────────────────────────────
@@ -1034,14 +1196,23 @@ def _execute_tool(
             return {"lat": coords[0], "lon": coords[1], "display_name": display}
 
         if name == "search_nearby_places":
-            return _tool_search_places(
+            places = _tool_search_places(
                 location=args.get("location", ""),
                 category=args.get("category", ""),
                 radius_m=int(args.get("radius_m", 500)),
             )
+            if places.get("results"):
+                result["places"] = places
+            return places
 
         if name == "get_weather":
-            return _tool_get_weather(location=args.get("location", ""))
+            weather = _tool_get_weather(
+                location=args.get("location", ""),
+                units=args.get("units", "imperial"),
+            )
+            if not weather.get("error"):
+                result["weather"] = weather
+            return weather
 
         if name in ("compute_route", "confirm_booking"):
             origin_text = args.get("origin", "")
@@ -1162,9 +1333,9 @@ def _execute_tool(
                     "advisory": advisory,
                 }
 
-            # confirm_booking path
-            booking_legs = run_booking(route, faa_adip_df=faa_adip_df,
-                                       progress_callback=progress_callback)
+            # confirm_booking path — build quick stubs instantly (no HTTP calls).
+            # The Detailed Itinerary button in app.py calls run_booking() lazily.
+            booking_legs = build_quick_booking_legs(route)
             result["booking_legs"] = booking_legs   # triggers app.py booking display
 
             # Build a booking reference from the first rideshare leg
@@ -1194,7 +1365,7 @@ def _execute_tool(
 
 # ── Step 3: Python routing engine ─────────────────────────────────────────────
 
-_SPEED_HELI_KMH  = 220.0
+_SPEED_HELI_KMH  = 250.0   # matches JS simulator SPEED_HELI_KMH
 _SPEED_DRIVE_KMH = 25.0   # urban average
 _SPEED_WALK_KMH  = 5.0    # pedestrian average
 _ROAD_FACTOR     = 1.35   # haversine → road distance multiplier
@@ -1598,15 +1769,19 @@ def _recover_tool_use_failed(
             pass
     if not fg:
         raw = str(exc)
-        m = _re_tool.search(r"'failed_generation':\s*'([^']*)'", raw)
-        if not m:
-            m = _re_tool.search(r'"failed_generation":\s*"([^"]*)"', raw)
-        if m:
-            fg = m.group(1)
+        # Try both quote styles; use re.DOTALL so newlines inside the value are matched
+        for _pat in (
+            r"'failed_generation':\s*'(.*?)'(?=\s*[,}])",
+            r'"failed_generation":\s*"(.*?)"(?=\s*[,}])',
+        ):
+            _m = _re_tool.search(_pat, raw, _re_tool.DOTALL)
+            if _m:
+                fg = _m.group(1)
+                break
     if not fg:
         return None
 
-    m = _re_tool.match(r"<function=(\w+)>(\{.*\})", fg.strip(), _re_tool.DOTALL)
+    m = _re_tool.search(r"<function=(\w+)>(.*)", fg.strip(), _re_tool.DOTALL)
     if not m:
         return None
 
@@ -1666,6 +1841,7 @@ def run_agent_v2(
     history: list[dict] | None = None,
     faa_adip_df=None,
     status_callback=None,
+    location_hint: str = "",
 ) -> dict:
     """Tool-calling concierge: natural language → tool dispatch → response.
 
@@ -1703,6 +1879,7 @@ def run_agent_v2(
         "tfr_warnings": [],
         "tfrs_ignored": False,
         "precip_warnings": [],
+        "model_warnings": [],
         "_messages": [],
     }
 
@@ -1714,10 +1891,14 @@ def run_agent_v2(
         )
         return result
 
-    # Build messages: system + trimmed history + current user turn
-    messages: list[dict] = [{"role": "system", "content": _CONCIERGE_SYSTEM}]
+    # Build messages: system + trimmed history + current user turn.
+    # Keep only last 6 messages (3 turns) — booking tool results are verbose JSON
+    # and 10 messages easily exceeds the 70b 6,000 TPM free-tier limit.
+    _sys = (_CONCIERGE_SYSTEM + f"\n\nSession context: {location_hint}"
+            if location_hint else _CONCIERGE_SYSTEM)
+    messages: list[dict] = [{"role": "system", "content": _sys}]
     if history:
-        messages.extend(history[-10:])
+        messages.extend(history[-6:])
     messages.append({"role": "user", "content": user_text})
 
     max_iterations = 8
@@ -1735,22 +1916,112 @@ def run_agent_v2(
                 temperature=0,
             )
         except Exception as exc:
+            import time as _time
             err_str = str(exc).lower()
-            # 70b may not be enabled in the Groq project — fall back silently
-            if active_model == _GROQ_MODEL_70B and (
-                "model_not_found" in err_str
-                or "rate_limit" in err_str
-                or "not found" in err_str
-                or "does not exist" in err_str
-                or "blocked" in err_str
-                or "permission" in err_str
-                or "403" in err_str
-            ):
-                log.warning(
-                    "llama-3.3-70b-versatile unavailable — falling back to %s. "
-                    "Enable it at console.groq.com/settings/project/limits.",
-                    _GROQ_MODEL,
-                )
+            # ── 70b failure ───────────────────────────────────────────────────
+            if active_model == _GROQ_MODEL_70B:
+                _is_not_enabled = any(kw in err_str for kw in (
+                    "model_not_found", "does not exist", "blocked",
+                    "permission", "403",
+                ))
+                _is_rate_limit = "rate_limit" in err_str or "429" in err_str
+
+                if _is_not_enabled:
+                    # Hard misconfiguration — fall back immediately and warn the user
+                    _warn = (
+                        f"⚠️ {_GROQ_MODEL_70B} is not enabled in this Groq project. "
+                        "Enable it at console.groq.com/settings/project/limits. "
+                        f"Falling back to {_GROQ_MODEL}."
+                    )
+                    log.warning(_warn)
+                    result["model_warnings"].append(_warn)
+
+                elif _is_rate_limit:
+                    # Rate limit — extract retry-after and retry 70b once before giving up on it
+                    _retry_after = 5
+                    try:
+                        if hasattr(exc, "response") and exc.response is not None:
+                            _retry_after = int(exc.response.headers.get("retry-after", 5))
+                    except Exception:
+                        pass
+                    _retry_after = min(_retry_after, 10)  # cap at 10 s for demo UX
+                    log.warning(
+                        "Groq 70b rate limit — retrying in %ds.", _retry_after,
+                    )
+                    _time.sleep(_retry_after)
+                    try:
+                        resp = client.chat.completions.create(
+                            model=_GROQ_MODEL_70B,
+                            messages=messages,
+                            tools=TOOL_SCHEMAS,
+                            tool_choice="auto",
+                            temperature=0,
+                        )
+                        # Retry succeeded — continue the loop with this response
+                        active_model = _GROQ_MODEL_70B
+                        # jump to the response-processing code below
+                        msg = resp.choices[0].message
+                        if not msg.tool_calls:
+                            result["response"] = (msg.content or "").strip()
+                            messages.append({"role": "assistant", "content": result["response"]})
+                            break
+                        assistant_msg: dict = {"role": "assistant", "content": msg.content or ""}
+                        assistant_msg["tool_calls"] = [
+                            {"id": tc.id, "type": "function",
+                             "function": {"name": tc.function.name,
+                                          "arguments": tc.function.arguments}}
+                            for tc in msg.tool_calls
+                        ]
+                        messages.append(assistant_msg)
+                        for tc in msg.tool_calls:
+                            if status_callback:
+                                status_callback("tool_call", {
+                                    "name": tc.function.name,
+                                    "args": json.loads(tc.function.arguments or "{}"),
+                                })
+                            tool_result = _execute_tool(
+                                name=tc.function.name,
+                                args=json.loads(tc.function.arguments or "{}"),
+                                helipads=helipads,
+                                faa_adip_df=faa_adip_df,
+                                result=result,
+                                progress_callback=status_callback,
+                            )
+                            if status_callback:
+                                status_callback("tool_result", {
+                                    "name": tc.function.name, "result": tool_result,
+                                })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": json.dumps(tool_result),
+                            })
+                        continue  # next iteration with 70b still active
+                    except Exception:
+                        _warn = (
+                            f"⚠️ {_GROQ_MODEL_70B} rate limit persists — "
+                            f"falling back to {_GROQ_MODEL} for this request."
+                        )
+                        log.warning(_warn)
+                        result["model_warnings"].append(_warn)
+
+                elif "tool_use_failed" in err_str or "failed to call a function" in err_str:
+                    # 70b produced a malformed tool call — try the same parse-and-recover
+                    # logic used for 8b before giving up and falling back.
+                    log.warning("Groq 70b tool_use_failed — attempting parse recovery.")
+                    recovered = _recover_tool_use_failed(
+                        exc, client, _GROQ_MODEL_70B, messages,
+                        helipads, faa_adip_df, result, status_callback,
+                    )
+                    if recovered is not None:
+                        resp = recovered
+                        continue
+                    log.warning("70b tool_use_failed unrecoverable — falling back to %s.", _GROQ_MODEL)
+
+                else:
+                    # Transient error (timeout, 503, network) — fall back silently
+                    log.warning("Groq 70b transient error (%s) — falling back to %s.", exc, _GROQ_MODEL)
+
                 active_model = _GROQ_MODEL
                 try:
                     resp = client.chat.completions.create(
@@ -1761,20 +2032,54 @@ def run_agent_v2(
                         temperature=0,
                     )
                 except Exception as exc2:
-                    # 8B sometimes generates <function=name>{args} instead of
-                    # OpenAI format — parse the failed_generation and recover
-                    recovered = _recover_tool_use_failed(
-                        exc2, client, active_model, messages,
-                        helipads, faa_adip_df, result, status_callback,
-                    )
-                    if recovered is not None:
-                        resp = recovered
+                    exc2_str = str(exc2).lower()
+                    # If 8b is ALSO rate-limited, extract retry-after and wait, then retry
+                    if "rate_limit" in exc2_str or "429" in exc2_str:
+                        import time as _time
+                        wait_s = 5
+                        try:
+                            if hasattr(exc2, "response") and exc2.response is not None:
+                                wait_s = int(exc2.response.headers.get("retry-after", 5))
+                        except Exception:
+                            pass
+                        wait_s = min(wait_s, 15)   # cap at 15 s during demo
+                        log.warning("8b rate limit — waiting %ds before retry.", wait_s)
+                        _time.sleep(wait_s)
+                        try:
+                            resp = client.chat.completions.create(
+                                model=active_model,
+                                messages=messages,
+                                tools=TOOL_SCHEMAS,
+                                tool_choice="auto",
+                                temperature=0,
+                            )
+                        except Exception as exc2b:
+                            log.error("8b still rate-limited after wait: %s", exc2b)
+                            result["error"] = "Service is busy — please try again in a moment."
+                            return result
                     else:
-                        log.error("Groq fallback also failed: %s", exc2)
-                        result["error"] = "Route Assistant is temporarily unavailable."
-                        return result
+                        # 8B malformed tool call — parse failed_generation and recover
+                        recovered = _recover_tool_use_failed(
+                            exc2, client, active_model, messages,
+                            helipads, faa_adip_df, result, status_callback,
+                        )
+                        if recovered is not None:
+                            resp = recovered
+                        else:
+                            # Last resort: ask 8b for a plain-text response with no tools
+                            log.warning("8b tool call failed — retrying without tools.")
+                            try:
+                                resp = client.chat.completions.create(
+                                    model=active_model,
+                                    messages=messages,
+                                    temperature=0,
+                                )
+                            except Exception as exc3:
+                                log.error("Groq 8b plain-text fallback failed: %s", exc3)
+                                result["error"] = "Route Assistant is temporarily unavailable."
+                                return result
+            # ── 8b is active model and produced a malformed tool call ─────────
             elif "tool_use_failed" in err_str or "failed to call a function" in err_str:
-                # 8B is already the active model and produced a malformed tool call
                 recovered = _recover_tool_use_failed(
                     exc, client, active_model, messages,
                     helipads, faa_adip_df, result, status_callback,
@@ -1782,9 +2087,18 @@ def run_agent_v2(
                 if recovered is not None:
                     resp = recovered
                 else:
-                    log.error("Groq API error (iteration %d): %s", iteration, exc)
-                    result["error"] = "Route Assistant is temporarily unavailable."
-                    return result
+                    # Last resort: plain-text response with no tools
+                    log.warning("8b tool_use_failed unrecoverable — retrying without tools.")
+                    try:
+                        resp = client.chat.completions.create(
+                            model=active_model,
+                            messages=messages,
+                            temperature=0,
+                        )
+                    except Exception as exc_plain:
+                        log.error("Groq plain-text fallback failed: %s", exc_plain)
+                        result["error"] = "Route Assistant is temporarily unavailable."
+                        return result
             else:
                 log.error("Groq API error (iteration %d): %s", iteration, exc)
                 result["error"] = "Route Assistant is temporarily unavailable."
@@ -2129,6 +2443,120 @@ def simulate_rideshare(origin_lat: float, origin_lon: float,
     }
 
 
+def build_quick_booking_legs(route: dict) -> list[dict]:
+    """Build instant booking leg stubs from a computed route — no API calls.
+
+    Returns the same structure as run_booking() but without ADIP data,
+    Mapillary thumbnails, or METAR. Call run_booking() to enrich these stubs.
+
+    Args:
+        route: Output of compute_skyroute().
+
+    Returns:
+        List of quick booking leg dicts, one per route leg.
+    """
+    quick_legs: list[dict] = []
+
+    for i, leg in enumerate(route.get("legs", [])):
+        if leg["mode"] == "helicopter":
+            pad_a = route.get("nearest_pad_origin", {})
+            pad_b = route.get("nearest_pad_dest", {})
+
+            def _basic(pad: dict) -> dict:
+                lat    = float(pad.get("lat", 0))
+                lon    = float(pad.get("lon", 0))
+                ident  = pad.get("ident") or pad.get("IDENT") or ""
+                osm_id = str(pad.get("osm_id", "") or "").strip()
+                return {
+                    "name":          pad.get("name") or ident or "Helipad",
+                    "ident":         ident,
+                    "osm_id":        osm_id,
+                    "lat":           lat,
+                    "lon":           lon,
+                    "gmaps_url":     f"https://maps.google.com/?q={lat},{lon}&z=18",
+                    "adip_url":      (f"https://adip.faa.gov/agis/public/#/simpleAirportMap/{ident}"
+                                      if ident else ""),
+                    "status":        "—",
+                    "servcity":      "—",
+                    "ownership":     "—",
+                    "private_use":   False,
+                    "address":       "",
+                    "contact_notes": "",
+                    "mly_image_id":  "",
+                    "mly_thumb_url": "",
+                }
+
+            quick_legs.append({
+                "leg_index":         i,
+                "mode":              "helicopter",
+                "from":              leg["from"],
+                "to":                leg["to"],
+                "duration_min":      leg["duration_min"],
+                "dist_km":           leg["dist_km"],
+                "departure_helipad": _basic(pad_a),
+                "arrival_helipad":   _basic(pad_b),
+                "metar_dep":         None,
+                "metar_arr":         None,
+            })
+
+        elif leg["mode"] in ("drive", "walk"):
+            if i == 0:
+                pad = route.get("nearest_pad_origin", {})
+                o   = route["origin"]
+                pickup_lat, pickup_lon   = o["lat"], o["lon"]
+                dropoff_lat, dropoff_lon = pad["lat"], pad["lon"]
+                _orig_poi  = route.get("origin_poi_name", "")
+                _orig_raw  = route.get("origin_name") or "Your origin"
+                from_name  = f"Origin: {_orig_poi or _orig_raw}"
+                to_name    = pad.get("name") or pad.get("ident") or leg["to"]
+            else:
+                pad = route.get("nearest_pad_dest", {})
+                d   = route["dest"]
+                pickup_lat, pickup_lon   = pad["lat"], pad["lon"]
+                dropoff_lat, dropoff_lon = d["lat"], d["lon"]
+                _dest_poi  = route.get("dest_poi_name", "")
+                _dest_raw  = route.get("dest_name") or "Your destination"
+                from_name  = pad.get("name") or pad.get("ident") or leg["from"]
+                to_name    = f"Destination: {_dest_poi or _dest_raw}"
+
+            if leg["mode"] == "walk":
+                quick_legs.append({
+                    "leg_index":        i,
+                    "mode":             "walk",
+                    "from":             from_name,
+                    "to":               to_name,
+                    "dist_km":          leg["dist_km"],
+                    "duration_min":     leg["duration_min"],
+                    "pickup_lat":       pickup_lat,
+                    "pickup_lon":       pickup_lon,
+                    "dropoff_lat":      dropoff_lat,
+                    "dropoff_lon":      dropoff_lon,
+                    "pickup_mly_id":    "",
+                    "pickup_mly_thumb": "",
+                })
+            else:
+                rs = simulate_rideshare(pickup_lat, pickup_lon, dropoff_lat, dropoff_lon)
+                quick_legs.append({
+                    "leg_index":         i,
+                    "mode":              "rideshare",
+                    "from":              from_name,
+                    "to":                to_name,
+                    "duration_min":      rs["duration_min"],  # top-level for quick card
+                    "dist_km":           leg["dist_km"],
+                    "pickup_lat":        pickup_lat,
+                    "pickup_lon":        pickup_lon,
+                    "dropoff_lat":       dropoff_lat,
+                    "dropoff_lon":       dropoff_lon,
+                    "pickup_mly_id":     "",
+                    "pickup_mly_thumb":  "",
+                    "dropoff_mly_id":    "",
+                    "dropoff_mly_thumb": "",
+                    "rideshare":         rs,
+                })
+
+    return quick_legs
+
+
 def run_booking(route: dict, faa_adip_df=None, progress_callback=None) -> list[dict]:
     """Build a per-leg booking plan for a computed route.
 
@@ -2306,6 +2734,8 @@ def run_booking(route: dict, faa_adip_df=None, progress_callback=None) -> list[d
                     "pickup_mapillary_url": _pu_url,
                     "pickup_mly_id": _pu_mly_id,
                     "pickup_mly_thumb": _pu_mly_thumb,
+                    "dropoff_mly_id": _do_mly_id,
+                    "dropoff_mly_thumb": _do_mly_thumb,
                 })
                 _emit(f"   ↳ Walk {leg['dist_km']} km · leg {i+1} confirmed ✓")
             else:

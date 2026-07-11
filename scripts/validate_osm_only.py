@@ -32,6 +32,7 @@ FAA_CSV = _PROJ_ROOT / "data" / "faa_adip_enriched.csv"
 OSM_CSV = _PROJ_ROOT / "data" / "osm_helipads_raw.csv"
 OUTPUT_CSV = _PROJ_ROOT / "data" / "osm_validated.csv"
 YOLO_MODEL_PATH = _PROJ_ROOT / "models" / "helipad_yolov8s.pt"
+OSM_CHIPS_DIR = _PROJ_ROOT / "data" / "osm_chips"
 
 PROX_THRESHOLD_M = 250.0
 
@@ -111,10 +112,11 @@ def main() -> None:
         log.info("Nothing to process.")
         return
 
-    # ── Initialise output file ─────────────────────────────────────────────────
+    # ── Initialise output file and chip directory ─────────────────────────────
     fresh_file = not (args.resume and OUTPUT_CSV.exists())
     if fresh_file:
         pd.DataFrame(columns=OUTPUT_COLS).to_csv(OUTPUT_CSV, index=False)
+    OSM_CHIPS_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Load YOLO model ────────────────────────────────────────────────────────
     from ultralytics import YOLO
@@ -146,6 +148,17 @@ def main() -> None:
             )
 
         chip = fetch_naip_chip(lat, lon)
+
+        if chip is not None:
+            # Save chip to data/osm_chips/{safe_id}.jpg for app thumbnail display.
+            import re as _re
+            _safe_id = _re.sub(r"[^a-zA-Z0-9_-]", "_", osm_id)
+            _chip_path = OSM_CHIPS_DIR / f"{_safe_id}.jpg"
+            if not _chip_path.exists():
+                try:
+                    chip.save(str(_chip_path), format="JPEG", quality=85)
+                except Exception as _e:
+                    log.warning("Could not save chip for osm_id=%s: %s", osm_id, _e)
 
         if chip is None:
             naip_status = "no_imagery"

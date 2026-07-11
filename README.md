@@ -140,6 +140,14 @@ For validated FAA helipads the ADIP record also provides TLOF/FATO dimensions, d
 - **Geographic split:** HelipadCAT records outside NE US → train/val; 747 NE US FAA records → test (held out, never seen during training — prevents geographic data leakage)
 - **License:** Coordinates are FAA-derived (Public Domain); annotations are from the paper authors with no explicit redistribution license stated; imagery not redistributed
 
+### Yelp Fusion API (v5.0 — POI enrichment)
+- **Endpoint:** `GET https://api.yelp.com/v3/businesses/search?term={name}&latitude={lat}&longitude={lon}&limit=1`
+- **Auth:** `Authorization: Bearer {YELP_API_KEY}` header
+- **Returns:** `rating` (1–5), `review_count`, `price` ($–$$$$), `url` (Yelp business page)
+- **Use:** enriches each TomTom POI result with crowd-sourced quality signals; rendered in `_render_places_card()` as gold stars + review count + price badge + red Yelp link pill
+- **Free tier:** 500 calls/day, no credit card required (register at yelp.com/developers)
+- **Fallback:** when `YELP_API_KEY` absent or call fails, `_yelp_enrich()` returns `{}` and card renders TomTom-only data
+
 ### FAA Digital NOTAM API (M4)
 - **Endpoint:** `https://api.faa.gov/notamSearch/api/v1/notams`
 - **Auth:** `X-API-Key: <FAA_API_KEY>` header (key from api.faa.gov — already in `.env.example`)
@@ -361,8 +369,8 @@ app.py renders:  st.status() thinking panel · TFR warnings · precipitation war
 | Tool | Description | Key implementation detail |
 |------|-------------|--------------------------|
 | `geocode` | Convert place name / address → `{lat, lon}` | TomTom Fuzzy Search → LLM address extraction → Nominatim; handles business names and floor-level addresses |
-| `search_nearby_places` | Find restaurants, hotels, cafes, parking near a location | TomTom POI Search + `categorySet` hard filter; normalisation table maps "fine dining" → `7315`, "steakhouse" → `7315002`, etc. |
-| `get_weather` | NWS Point Forecast at any CONUS location | 2-step NWS API (points endpoint → forecast URL); 10-min in-process cache; returns temp, wind, precip chance, detailed forecast |
+| `search_nearby_places` | Find restaurants, hotels, cafes, parking near a location | TomTom POI Search + `categorySet` hard filter + `openingHours=nextSevenDays`; Yelp Fusion enrichment (rating/reviews/price) in parallel via `ThreadPoolExecutor`; normalisation table maps "fine dining" → `7315`, "steakhouse" → `7315002`, etc. |
+| `get_weather` | NWS Point Forecast at any CONUS location | 2-step NWS API; `units` param (`imperial`/`metric`); cache always stores raw imperial and converts on read — units never freeze to first-call value; 10-min in-process cache |
 | `compute_route` | Multimodal helicopter + ground route | `compute_skyroute()` → TFR segment check (7 sample points) → precipitation sampling → plain-English advisory |
 | `confirm_booking` | Book the confirmed route per leg | `run_booking()`: ADIP + METAR + Mapillary ID fetch in parallel (Phase 1: 6 threads); thumbnail URLs in parallel (Phase 2: 2 threads); latency ~3s vs ~12s serial |
 
@@ -424,7 +432,8 @@ ADIP coordination remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) are 
 | M2 | 02 Jun 2026 | ✅ DONE | Real data in app, EDA & HIE tab (3 charts + KPI density map), ADIP enrichment, cross-source matching |
 | M3 | 23 Jun 2026 | ✅ DONE | 4-model visual detection comparison (YOLO11m P=0.931 F1=0.888), XGBoost structured baseline (F1=0.73), live Inspector + live inference in app |
 | M4 | 04 Jul 2026 | ✅ DONE | TFR overlay, NWS radar, TomTom routing, Mapbox traffic basemap, validated OSM pool, LLM Route Assistant + booking flow, Streamlit Cloud deployment |
-| Final | 21 Jul 2026 | 🔄 IN PROGRESS | Demo Day polish; METAR/TAF per-leg badges ✅, precipitation warnings ✅, registry accuracy analysis |
+| **v5.0 Post-M4** | **11 Jul 2026** | **✅ DONE** | Weather & POI rich cards, Yelp Fusion enrichment, context-aware location hint, itinerary UX fixes, NAIP live chip fallback |
+| Final | 21 Jul 2026 | 🔄 IN PROGRESS | Demo Day polish; registry accuracy analysis |
 
 ### M3 Completed Deliverables
 
@@ -485,6 +494,22 @@ ADIP coordination remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) are 
 | **8B model tool-call recovery** | ✅ Done | `_recover_tool_use_failed()` in `src/agent.py` — parses `failed_generation` from Groq 400 error, executes tool manually; Route Assistant works when `llama-3.3-70b-versatile` is project-blocked |
 | **Route Assistant rerun fix** | ✅ Done | `st.rerun()` inside fragment fires only after booking confirmations — eliminates full-app grayout on simple queries |
 
+### v5.0 Post-M4 Completed Deliverables (11 Jul 2026)
+
+| Item | Notes |
+|------|-------|
+| `_render_weather_card()` in `app.py` | Dark SkyRoute-themed HTML card: current conditions + 4-period forecast + bottom bar; units follow the user's request (°C/m·s⁻¹ or °F/mph); NWS cache always stores raw imperial and converts on read — units never freeze to first-call value |
+| `_render_places_card()` in `app.py` | Dark HTML POI card: TomTom name/address/distance + opening hours (today's schedule from `openingHours=nextSevenDays`) + Yelp star rating/review count/price level + phone/website/Yelp pill links |
+| Yelp Fusion integration (`src/agent.py`) | `_yelp_enrich()` + `_yelp_cache`; all 5 results enriched in **parallel** via `ThreadPoolExecutor`; graceful fallback to TomTom-only data when `YELP_API_KEY` absent |
+| `location_hint` in `run_agent_v2` | Last route origin/destination injected into system prompt as session context so follow-up place/weather queries use the correct default location without user re-specifying |
+| NAIP live chip fallback in `_naip_chip_b64` | Falls back to a live USDA APFO fetch for pads not yet chipped on disk (e.g. arrival-side OSM helipads); result cached via `@st.cache_data` |
+| Chip resolution 100→280 px | Display thumbnail raised to 280×280px (shown at 96px, expands to 220px on click — crisp at both sizes) |
+| Walk leg destination imagery | Detailed itinerary now shows both **departure** (start of walk) and **destination** street views side-by-side; `dropoff_mly_id/thumb` now stored in walk booking leg dict |
+| Itinerary height fix | Helicopter card estimate 165→225px; bottom buffer 110→150px — card no longer clipped |
+| URL protocol fix in POI card | TomTom URLs lacking `http://` prefix are normalised to `https://` before rendering — avoids localhost prefix in iframe |
+| "Load detailed view" button fix | `run_booking()` was incorrectly receiving the outer `_result` dict; now correctly receives `_result["route"]` (inner route dict with `legs` key) |
+| Nested expander fix | `_render_detailed_itinerary` inner `st.expander` calls replaced with `st.markdown` labels — resolves `StreamlitAPIException: Expanders may not be nested` |
+
 ### Final Milestone Checklist (21 Jul 2026 — Demo Day)
 
 - [x] Route METAR/TAF panel — per-leg wind/visibility/ceiling badges; VFR/MVFR/IFR colour coding
@@ -494,6 +519,9 @@ ADIP coordination remarks (e.g. `FOR CD CTC NEW YORK APCH AT 516-683-2962`) are 
 - [x] Drive-only time estimate fix — distance-tiered speed (30/55/70 km/h) replaces flat 25 km/h
 - [x] Booking pickup/dropoff label — resolved POI name + address from TomTom geocoding
 - [x] METAR ICAO lookup — pre-resolve FAA ident → `ICAO_ID` before Aviation Weather Center call
+- [x] Weather & POI rich cards with unit awareness and Yelp Fusion ratings
+- [x] Context-aware location hint for follow-up queries
+- [x] NAIP live chip fallback + 280px resolution + walk leg destination imagery
 - [ ] `scripts/compare_registry_accuracy.py` — FAA vs OSM coordinate accuracy vs YOLO bbox centre
 - [ ] End-to-end demo walkthrough: Miles Urban persona, NYC → Greenwich CT, live TFR + weather, multimodal route with aerial advantage callout
 - [ ] `Worklog.md` updated with Final session notes

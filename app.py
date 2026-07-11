@@ -71,7 +71,7 @@ from src.weather import (
     get_nws_wms_kwargs,
     PRECIP_THRESHOLDS,
 )
-from src.agent import run_agent, run_agent_v2, run_booking, is_booking_intent
+from src.agent import run_agent, run_agent_v2, run_booking, build_quick_booking_legs, is_booking_intent
 
 log = logging.getLogger(__name__)
 
@@ -1152,18 +1152,18 @@ _ROUTING_HTML_TEMPLATE = """<!DOCTYPE html>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
-    html, body { width:100%; height:100%; overflow:hidden; font-family:'Segoe UI',sans-serif; }
-    #map { width:100%; height:570px; }
+    html, body { width:100%; background:#060b14; font-family:'Segoe UI',sans-serif; }
+    #map { width:100%; height:490px; }
     #aerial-bar {
       width:100%; height:54px;
       background:linear-gradient(90deg,#060b14,#0d1b2a,#060b14);
-      border-top:2px solid rgba(100,116,139,0.4);
+      border-bottom:2px solid rgba(100,116,139,0.4);
       display:flex; align-items:center; justify-content:center;
       font-size:13px; color:#94a3b8; gap:24px; padding:0 20px;
-      transition:border-top-color 0.3s;
+      transition:border-bottom-color 0.3s;
     }
-    #aerial-bar.has-save { border-top-color:#22c55e; }
-    #aerial-bar.no-save  { border-top-color:#475569; }
+    #aerial-bar.has-save { border-bottom-color:#22c55e; }
+    #aerial-bar.no-save  { border-bottom-color:#475569; }
     .ab-seg { display:flex; flex-direction:column; align-items:center; gap:2px; }
     .ab-lbl { font-size:10px; color:#475569; text-transform:uppercase; letter-spacing:.6px; }
     .ab-val { font-size:15px; font-weight:700; }
@@ -1191,11 +1191,11 @@ _ROUTING_HTML_TEMPLATE = """<!DOCTYPE html>
       z-index:999; box-shadow:0 2px 10px rgba(0,0,0,.2); white-space:nowrap;
     }
     #compare-panel {
-      display:none; position:absolute; bottom:10px; left:50%;
-      transform:translateX(-50%);
-      background:rgba(10,12,28,.97); color:#e8e8f0; border-radius:10px;
-      padding:12px 18px 10px; box-shadow:0 4px 24px rgba(0,0,0,.7);
-      font-size:12px; z-index:1000; min-width:500px; max-width:720px;
+      display:none; width:100%;
+      background:rgba(10,12,28,.97); color:#e8e8f0;
+      border-top:2px solid #1e2a3a;
+      padding:14px 20px 12px;
+      font-size:12px;
     }
     #compare-panel h4 { margin:0; font-size:14px; color:#00d4ff; display:inline; }
     #compare-panel .close-x { float:right; background:none; border:none; color:#6b7280; cursor:pointer; font-size:16px; }
@@ -1220,33 +1220,33 @@ _ROUTING_HTML_TEMPLATE = """<!DOCTYPE html>
   </style>
 </head>
 <body>
+<div id="aerial-bar">
+  <span style="color:#475569;font-size:12px">Click &#x1F9ED; then pick two points to compare ground vs aerial routes</span>
+</div>
 <div style="position:relative">
   <div id="map"></div>
   <div id="status-bar"></div>
-  <div id="compare-panel">
-    <button class="close-x" onclick="clearMM()">&times;</button>
-    <h4>&#x1F9ED; Multi-Modal Route Comparison</h4>
-    <div class="from-to" id="cp-from-to"></div>
-    <table>
-      <thead><tr>
-        <th>Mode</th><th>Distance</th><th>Time</th><th>Aerial Leg</th>
-      </tr></thead>
-      <tbody id="cp-tbody"></tbody>
-    </table>
-    <div class="legend">
-      <span><span class="ld" style="background:#ef4444"></span>Ground route (red)</span>
-      <span><span class="ld" style="background:#22c55e"></span>Drive to/from helipad (green)</span>
-      <span><span class="ld" style="background:#00d4ff"></span>Helicopter flight (cyan dashed)</span>
-    </div>
-  </div>
   <div id="route-info">
     <strong id="ri-title"></strong>&nbsp;
     <span id="ri-dist"></span> &middot; <span id="ri-dur"></span>
     <button onclick="clearHeli()" style="margin-left:10px;background:#eee;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">&times; Clear</button>
   </div>
 </div>
-<div id="aerial-bar">
-  <span style="color:#475569;font-size:12px">Click &#x1F9ED; then pick two points to compare ground vs aerial routes</span>
+<div id="compare-panel">
+  <button class="close-x" onclick="clearMM()">&times;</button>
+  <h4>&#x1F9ED; Multi-Modal Route Comparison</h4>
+  <div class="from-to" id="cp-from-to"></div>
+  <table>
+    <thead><tr>
+      <th>Mode</th><th>Distance</th><th>Time</th><th>Aerial Leg</th>
+    </tr></thead>
+    <tbody id="cp-tbody"></tbody>
+  </table>
+  <div class="legend">
+    <span><span class="ld" style="background:#ef4444"></span>Ground route (red)</span>
+    <span><span class="ld" style="background:#22c55e"></span>Drive to/from helipad (green)</span>
+    <span><span class="ld" style="background:#00d4ff"></span>Helicopter flight (cyan dashed)</span>
+  </div>
 </div>
 <script>
 var RANGE_KM = 300 * 1.852;
@@ -3398,7 +3398,7 @@ if _ar and _ar.get("origin") and _ar.get("destination"):
     )
 components.html(
     build_routing_html(faa_raw, osm_raw, osm_validated_df=_load_osm_validated(), **_sim_kwargs),
-    height=650, scrolling=False)
+    height=820, scrolling=False)
 
 st.divider()
 st.caption("SkyRoute HIE · Technion LBS Course 016833 · FAA ADDS-ArcGIS + OpenStreetMap")
@@ -3413,6 +3413,7 @@ st.caption("SkyRoute HIE · Technion LBS Course 016833 · FAA ADDS-ArcGIS + Open
 _INSPECTOR_CSV    = DATA_DIR / "inspector_results.csv"
 _TEST_IMG_DIR     = DATA_DIR / "yolo_dataset" / "images" / "test"
 _TEST_LBL_DIR     = DATA_DIR / "yolo_dataset" / "labels" / "test"
+_OSM_CHIPS_DIR    = DATA_DIR / "osm_chips"
 _FAA_NATIONAL_CSV = DATA_DIR / "faa_national.csv"
 
 _INSP_B_SOURCES: dict[str, str] = {
@@ -4233,7 +4234,7 @@ with tab_results:
 
     _CMP_DIR    = YOLO_MODEL_PATH.parent / "plots_comparison"
 
-    _res_tabs = st.tabs(["📊 XGBoost Structured Baseline", "🤖 YOLO Models Comparison"])
+    _res_tabs = st.tabs(["📊 XGBoost Structured Baseline", "🤖 YOLO Models Comparison", "🗺️ Registry & Network"])
 
     # ══ XGBoost tab (now first) ═════════════════════════════════════════════════
     with _res_tabs[0]:
@@ -4473,6 +4474,301 @@ with tab_results:
                         _ec[_ej].markdown(f"**{_et}**")
                         _safe_image(_ec[_ej], _ind_dir / _ef)
 
+    # ══ Registry & Network tab ══════════════════════════════════════════════════
+    with _res_tabs[2]:
+        st.markdown(
+            "**HIE Data Quality — Registry Accuracy & OSM Network Expansion.**  \n"
+            "Answers two questions: *(1)* Which registry (FAA or OSM) has more accurate GPS "
+            "coordinates, as judged by YOLO-detected helipad centres? "
+            "*(2)* How much does adding HIE-validated OSM-only pads expand the NE US routing network?"
+        )
+
+        _REG_ACC_PATH = DATA_DIR / "registry_accuracy.csv"
+        _OSM_VAL_PATH = DATA_DIR / "osm_validated.csv"
+        _INSP_PATH    = DATA_DIR / "inspector_results.csv"
+
+        @st.cache_data
+        def _load_registry_data():
+            acc  = pd.read_csv(_REG_ACC_PATH)  if _REG_ACC_PATH.exists()  else pd.DataFrame()
+            val  = pd.read_csv(_OSM_VAL_PATH)  if _OSM_VAL_PATH.exists()  else pd.DataFrame()
+            insp = pd.read_csv(_INSP_PATH)     if _INSP_PATH.exists()     else pd.DataFrame()
+            return acc, val, insp
+
+        if not _REG_ACC_PATH.exists():
+            st.info(
+                "Registry accuracy data not yet generated.  \n"
+                "Run: `python scripts/compare_registry_accuracy.py`"
+            )
+        else:
+            _acc_df, _val_df, _insp_df = _load_registry_data()
+
+            # ── Part 1 header ────────────────────────────────────────────────
+            st.markdown("#### Part 1 — Registry Coordinate Accuracy")
+            st.caption(
+                "For matched FAA+OSM pairs where YOLO detected a helipad, "
+                "the detected bounding-box centre is the ground truth. "
+                "Distances are measured from each registry coordinate to that ground truth."
+            )
+
+            _n_pairs   = len(_acc_df)
+            _faa_wins  = int((_acc_df["winner"] == "FAA").sum())
+            _osm_wins  = int((_acc_df["winner"] == "OSM").sum())
+            _mean_faa  = float(_acc_df["dist_faa_m"].mean())
+            _mean_osm  = float(_acc_df["dist_osm_m"].mean())
+            _med_faa   = float(_acc_df["dist_faa_m"].median())
+            _med_osm   = float(_acc_df["dist_osm_m"].median())
+            _flagged   = int(_acc_df["flag_different_pad"].sum())
+
+            _kc1, _kc2, _kc3, _kc4 = st.columns(4)
+            _kc1.metric("Matched pairs",     f"{_n_pairs}")
+            _kc2.metric("FAA wins",          f"{_faa_wins} ({_faa_wins/_n_pairs*100:.0f}%)")
+            _kc3.metric("OSM wins",          f"{_osm_wins} ({_osm_wins/_n_pairs*100:.0f}%)",
+                        delta="more accurate per-pair", delta_color="normal")
+            _kc4.metric("Flagged (>50 m apart)", f"{_flagged}",
+                        help="FAA and OSM coordinates >50 m apart — may be two distinct helipads.")
+
+            _kc5, _kc6, _kc7, _kc8 = st.columns(4)
+            _kc5.metric("Mean FAA error",    f"{_mean_faa:.1f} m")
+            _kc6.metric("Mean OSM error",    f"{_mean_osm:.1f} m",
+                        delta=f"{_mean_osm - _mean_faa:+.1f} m vs FAA", delta_color="inverse")
+            _kc7.metric("Median FAA error",  f"{_med_faa:.1f} m")
+            _kc8.metric("Median OSM error",  f"{_med_osm:.1f} m")
+
+            st.caption(
+                f"**Key insight:** OSM wins {_osm_wins/_n_pairs*100:.0f}% of individual comparisons "
+                f"(more accurate on a per-helipad basis), yet FAA's *mean* error ({_mean_faa:.1f} m) "
+                f"is lower than OSM's ({_mean_osm:.1f} m). "
+                "This apparent contradiction is explained by FAA having a small number of large "
+                "outlier errors that inflate its mean, while OSM errors are more uniformly distributed "
+                "— OSM contributors place markers from aerial imagery, which is typically ≤3 m accurate, "
+                "but FAA surveyors occasionally record pad entrances or administrative office addresses "
+                "rather than the TLOF centre."
+            )
+
+            st.divider()
+
+            # ── Part 1 charts ────────────────────────────────────────────────
+            _pc1, _pc2 = st.columns(2)
+
+            with _pc1:
+                st.markdown("**Error Distribution — FAA vs OSM**")
+                _dist_plot_df = pd.concat([
+                    pd.DataFrame({"Registry": "FAA", "Distance (m)": _acc_df["dist_faa_m"]}),
+                    pd.DataFrame({"Registry": "OSM", "Distance (m)": _acc_df["dist_osm_m"]}),
+                ], ignore_index=True)
+                _fig_dist = px.histogram(
+                    _dist_plot_df,
+                    x="Distance (m)",
+                    color="Registry",
+                    barmode="overlay",
+                    opacity=0.65,
+                    nbins=40,
+                    color_discrete_map={"FAA": "#3b82f6", "OSM": "#f59e0b"},
+                    labels={"Distance (m)": "Distance to YOLO-detected centre (m)"},
+                )
+                _fig_dist.update_layout(
+                    height=320, margin=dict(l=0, r=0, t=10, b=0),
+                    legend=dict(orientation="h", y=1.02, x=0),
+                    plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                    font_color="#fafafa",
+                    xaxis=dict(gridcolor="#333"), yaxis=dict(gridcolor="#333"),
+                )
+                _fig_dist.add_vline(x=_mean_faa, line_dash="dot", line_color="#3b82f6",
+                                    annotation_text=f"FAA mean {_mean_faa:.0f}m",
+                                    annotation_font_color="#3b82f6")
+                _fig_dist.add_vline(x=_mean_osm, line_dash="dot", line_color="#f59e0b",
+                                    annotation_text=f"OSM mean {_mean_osm:.0f}m",
+                                    annotation_font_color="#f59e0b")
+                st.plotly_chart(_fig_dist, use_container_width=True)
+
+            with _pc2:
+                st.markdown("**Winner Breakdown by Match Method**")
+                _win_by_method = (
+                    _acc_df.groupby(["match_method", "winner"])
+                    .size().reset_index(name="count")
+                )
+                _fig_win = px.bar(
+                    _win_by_method,
+                    x="match_method", y="count", color="winner",
+                    barmode="group",
+                    color_discrete_map={"FAA": "#3b82f6", "OSM": "#f59e0b"},
+                    labels={"match_method": "Match method", "count": "Helipads", "winner": "Winner"},
+                    text="count",
+                )
+                _fig_win.update_traces(textposition="outside")
+                _fig_win.update_layout(
+                    height=320, margin=dict(l=0, r=0, t=10, b=0),
+                    legend=dict(orientation="h", y=1.02, x=0),
+                    plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                    font_color="#fafafa",
+                    xaxis=dict(gridcolor="#333"), yaxis=dict(gridcolor="#333"),
+                )
+                st.plotly_chart(_fig_win, use_container_width=True)
+
+            # ── FAA vs OSM paired scatter ────────────────────────────────────
+            st.markdown("**Paired Accuracy Scatter — FAA error vs OSM error per helipad**")
+            _max_err = max(_acc_df["dist_faa_m"].max(), _acc_df["dist_osm_m"].max()) * 1.05
+            _fig_sct = px.scatter(
+                _acc_df,
+                x="dist_faa_m", y="dist_osm_m",
+                color="winner",
+                color_discrete_map={"FAA": "#3b82f6", "OSM": "#f59e0b"},
+                hover_data=["faa_ident", "match_method", "faa_osm_dist_m"],
+                labels={"dist_faa_m": "FAA error (m)", "dist_osm_m": "OSM error (m)", "winner": "Winner"},
+                opacity=0.6,
+            )
+            _fig_sct.add_shape(
+                type="line", x0=0, y0=0, x1=_max_err, y1=_max_err,
+                line=dict(color="#888", dash="dot", width=1),
+            )
+            _fig_sct.add_annotation(
+                x=_max_err * 0.85, y=_max_err * 0.92,
+                text="FAA = OSM (diagonal)", showarrow=False,
+                font=dict(color="#888", size=10),
+            )
+            _fig_sct.update_layout(
+                height=340, margin=dict(l=0, r=0, t=10, b=0),
+                legend=dict(orientation="h", y=1.02, x=0),
+                plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                font_color="#fafafa",
+                xaxis=dict(gridcolor="#333", range=[0, _max_err]),
+                yaxis=dict(gridcolor="#333", range=[0, _max_err]),
+            )
+            st.plotly_chart(_fig_sct, use_container_width=True)
+            st.caption(
+                "Points above the diagonal → OSM coordinate is farther from the YOLO centre (FAA wins).  "
+                "Points below → FAA coordinate is farther (OSM wins).  "
+                "Colour shows the winner per helipad."
+            )
+
+            # ── Part 2 ───────────────────────────────────────────────────────
+            st.divider()
+            st.markdown("#### Part 2 — OSM Network Expansion")
+            st.caption(
+                "2,000 random origin points sampled uniformly across the NE US bounding box. "
+                "Nearest-helipad distance measured under two routing pools: "
+                "FAA-only baseline vs FAA + HIE-validated OSM-only pads."
+            )
+
+            if not _val_df.empty and not _insp_df.empty:
+                import numpy as _np
+                from src.analysis import haversine_matrix as _hav_matrix
+
+                _faa_pool = _insp_df[["lat", "lon"]].dropna()
+                _osm_pool = _val_df[_val_df["hie_visual_detected"] == True][["lat", "lon"]].dropna()
+                _combined = pd.concat([_faa_pool, _osm_pool], ignore_index=True)
+
+                _n_faa  = len(_faa_pool)
+                _n_osm  = len(_osm_pool)
+                _n_comb = len(_combined)
+                _pct_inc = (_n_comb / _n_faa - 1) * 100
+
+                _rng      = _np.random.default_rng(42)
+                _orig_lat = _rng.uniform(40.0, 45.5, 2_000)
+                _orig_lon = _rng.uniform(-76.0, -70.0, 2_000)
+
+                _d_faa_km  = _hav_matrix(_orig_lat, _orig_lon,
+                                          _faa_pool["lat"].values, _faa_pool["lon"].values).min(axis=1) / 1000
+                _d_comb_km = _hav_matrix(_orig_lat, _orig_lon,
+                                          _combined["lat"].values, _combined["lon"].values).min(axis=1) / 1000
+
+                _mean_d_faa  = float(_d_faa_km.mean())
+                _mean_d_comb = float(_d_comb_km.mean())
+                _med_d_faa   = float(_np.median(_d_faa_km))
+                _med_d_comb  = float(_np.median(_d_comb_km))
+                _p90_faa     = float(_np.percentile(_d_faa_km, 90))
+                _p90_comb    = float(_np.percentile(_d_comb_km, 90))
+                _within_faa  = float((_d_faa_km  <= 5.0).mean() * 100)
+                _within_comb = float((_d_comb_km <= 5.0).mean() * 100)
+                _gained = int(((_d_faa_km > 5.0) & (_d_comb_km <= 5.0)).sum())
+
+                _nc1, _nc2, _nc3, _nc4 = st.columns(4)
+                _nc1.metric("FAA routing pool",     f"{_n_faa} pads")
+                _nc2.metric("OSM pads added",       f"+{_n_osm}",
+                            delta=f"+{_pct_inc:.0f}% pool size", delta_color="normal")
+                _nc3.metric("Within 5 km coverage",
+                            f"{_within_comb:.1f}%",
+                            delta=f"{_within_comb - _within_faa:+.1f}pp vs FAA-only",
+                            delta_color="normal")
+                _nc4.metric("New origins gained access", f"{_gained}",
+                            help="Origins >5 km from any FAA pad but now ≤5 km from the combined pool.")
+
+                _nc5, _nc6, _nc7, _nc8 = st.columns(4)
+                _nc5.metric("Mean distance — FAA only",     f"{_mean_d_faa:.2f} km")
+                _nc6.metric("Mean distance — FAA + OSM",    f"{_mean_d_comb:.2f} km",
+                            delta=f"{_mean_d_comb - _mean_d_faa:+.2f} km", delta_color="inverse")
+                _nc7.metric("Median distance — FAA only",   f"{_med_d_faa:.2f} km")
+                _nc8.metric("Median distance — FAA + OSM",  f"{_med_d_comb:.2f} km",
+                            delta=f"{_med_d_comb - _med_d_faa:+.2f} km", delta_color="inverse")
+
+                st.caption(
+                    f"**Interpretation:** Adding {_n_osm:,} HIE-validated OSM-only pads (+{_pct_inc:.0f}% pool) "
+                    f"reduces mean nearest-pad distance from {_mean_d_faa:.2f} km to {_mean_d_comb:.2f} km "
+                    f"({(_mean_d_faa - _mean_d_comb) / _mean_d_faa * 100:.1f}% reduction). "
+                    "The gain is modest because NE US urban areas are already well-served by FAA pads. "
+                    f"The {_gained} origins that 'gained access' are in suburban/rural gaps — "
+                    "exactly the greenfield market for AAM expansion."
+                )
+
+                st.divider()
+
+                # ── Part 2 charts ────────────────────────────────────────────
+                _nc_ch1, _nc_ch2 = st.columns(2)
+
+                with _nc_ch1:
+                    st.markdown("**Nearest-Pad Distance Distribution**")
+                    _exp_df = pd.concat([
+                        pd.DataFrame({"Pool": "FAA only",      "Distance (km)": _d_faa_km}),
+                        pd.DataFrame({"Pool": "FAA + OSM HIE", "Distance (km)": _d_comb_km}),
+                    ], ignore_index=True)
+                    _fig_exp = px.histogram(
+                        _exp_df,
+                        x="Distance (km)", color="Pool",
+                        barmode="overlay", opacity=0.65, nbins=50,
+                        color_discrete_map={"FAA only": "#6366f1", "FAA + OSM HIE": "#22c55e"},
+                    )
+                    _fig_exp.update_layout(
+                        height=320, margin=dict(l=0, r=0, t=10, b=0),
+                        legend=dict(orientation="h", y=1.02, x=0),
+                        plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                        font_color="#fafafa",
+                        xaxis=dict(gridcolor="#333"), yaxis=dict(gridcolor="#333"),
+                    )
+                    st.plotly_chart(_fig_exp, use_container_width=True)
+
+                with _nc_ch2:
+                    st.markdown("**Mean / Median / P90 Nearest Distance**")
+                    _bar_data = {
+                        "Metric": ["Mean", "Median", "P90"],
+                        "FAA only":      [_mean_d_faa,  _med_d_faa,  _p90_faa],
+                        "FAA + OSM HIE": [_mean_d_comb, _med_d_comb, _p90_comb],
+                    }
+                    _fig_bar = px.bar(
+                        pd.melt(
+                            pd.DataFrame(_bar_data),
+                            id_vars="Metric", var_name="Pool", value_name="Distance (km)",
+                        ),
+                        x="Metric", y="Distance (km)", color="Pool",
+                        barmode="group", text_auto=".2f",
+                        color_discrete_map={"FAA only": "#6366f1", "FAA + OSM HIE": "#22c55e"},
+                    )
+                    _fig_bar.update_traces(textposition="outside")
+                    _fig_bar.update_layout(
+                        height=320, margin=dict(l=0, r=0, t=10, b=0),
+                        legend=dict(orientation="h", y=1.02, x=0),
+                        plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                        font_color="#fafafa",
+                        xaxis=dict(gridcolor="#333"), yaxis=dict(gridcolor="#333"),
+                    )
+                    st.plotly_chart(_fig_bar, use_container_width=True)
+
+            else:
+                st.info(
+                    "OSM validation data not found.  \n"
+                    "Run: `python scripts/validate_osm_only.py`  \n"
+                    "then: `python scripts/compare_registry_accuracy.py`"
+                )
+
 
 def _mly_viewer_html(lat: float, lon: float, height: int = 260,
                      image_id: str = "", thumb_url: str = "") -> str:
@@ -4691,6 +4987,922 @@ def _metar_badge(metar: dict | None) -> str:
     return f"{badge} {details}"
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def _load_inspector_df() -> "pd.DataFrame":
+    """Return inspector_results.csv as a DataFrame (cached)."""
+    if not _INSPECTOR_CSV.exists():
+        return pd.DataFrame(columns=["ident", "bbox_px"])
+    return pd.read_csv(_INSPECTOR_CSV)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _naip_chip_b64(ident: str, osm_id: str = "",
+                   lat: float = 0.0, lon: float = 0.0) -> str | None:
+    """Return base64 JPEG thumbnail of a NAIP chip with YOLO bbox drawn.
+
+    Resolution: 280×280px (displayed at 96px; expands to 220px on click).
+
+    Lookup order:
+    1. data/yolo_dataset/images/test/{ident}.jpg  — FAA test-set (bbox from inspector CSV)
+    2. data/osm_chips/{safe_osm_id}.jpg           — OSM-validated chip on disk
+    3. Live NAIP fetch via USDA APFO when lat/lon provided — for pads not yet chipped
+
+    Args:
+        ident:  FAA ident string, or "" for OSM-only pads.
+        osm_id: OSM node ID string (used when ident is empty).
+        lat:    Latitude for live NAIP fetch fallback.
+        lon:    Longitude for live NAIP fetch fallback.
+
+    Returns:
+        Base64-encoded JPEG string, or None if imagery unavailable.
+    """
+    import ast, io, base64 as _b64, re
+    from PIL import Image, ImageDraw
+
+    chip_path = None
+    bbox_from_csv: list | None = None
+
+    if ident:
+        _p = _TEST_IMG_DIR / f"{ident}.jpg"
+        if _p.exists():
+            chip_path = _p
+            insp_df = _load_inspector_df()
+            if not insp_df.empty:
+                row = insp_df[insp_df["ident"] == ident]
+                if not row.empty:
+                    bbox_raw = row.iloc[0].get("bbox_px")
+                    if pd.notna(bbox_raw):
+                        try:
+                            b = ast.literal_eval(str(bbox_raw))
+                            if len(b) == 4:
+                                bbox_from_csv = b
+                        except (ValueError, SyntaxError):
+                            pass
+
+    if chip_path is None and osm_id:
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", osm_id)
+        _p2 = _OSM_CHIPS_DIR / f"{safe_id}.jpg"
+        if _p2.exists():
+            chip_path = _p2
+
+    # Live NAIP fetch — for pads not yet in test set or osm_chips/
+    if chip_path is None and lat and lon:
+        try:
+            from src.hie import fetch_naip_chip as _fetch_naip
+            _live = _fetch_naip(float(lat), float(lon))
+            if _live is not None:
+                img = _live.convert("RGB")
+                img.thumbnail((280, 280), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                return _b64.b64encode(buf.getvalue()).decode()
+        except Exception:
+            pass
+        return None
+
+    try:
+        img = Image.open(chip_path).convert("RGB")
+        if bbox_from_csv:
+            draw = ImageDraw.Draw(img)
+            draw.rectangle(bbox_from_csv, outline=(0, 255, 0), width=4)
+        img.thumbnail((280, 280), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return _b64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return None
+
+
+def _render_quick_itinerary(legs: list[dict]) -> None:
+    """Render a boarding-pass style e-ticket via components.html (iframe — onclick JS works)."""
+    import hashlib
+    from datetime import datetime
+
+    def _dur(bl: dict) -> int:
+        return int(bl.get("duration_min") or bl.get("rideshare", {}).get("duration_min", 0))
+
+    def _esc(s) -> str:
+        return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+
+    def _a(href, label):
+        return f'<a href="{_esc(href)}" target="_blank">{label}</a>' if href else ""
+
+    def _pad_label(pad_d: dict, short: bool = False) -> str:
+        n = (pad_d.get("name") or "").strip()
+        i = (pad_d.get("ident") or "").strip()
+        lat = pad_d.get("lat")
+        lon = pad_d.get("lon")
+        if n and i and n.lower() != "helipad":
+            return f'{_esc(n)} <span class="ident">({_esc(i)})</span>'
+        if n and n.lower() != "helipad":
+            return _esc(n)
+        if i:
+            return f'HIE Helipad <span class="ident">({_esc(i)})</span>'
+        if lat and lon and not short:
+            try:
+                return f'HIE Helipad <span class="ident">({float(lat):.4f}°, {abs(float(lon)):.4f}°W)</span>'
+            except Exception:
+                pass
+        return "HIE Helipad"
+
+    def _thumb(ident, osm_id="", lat=0.0, lon=0.0):
+        if not ident and not osm_id and not (lat and lon):
+            return ""
+        b64 = _naip_chip_b64(ident, osm_id, float(lat or 0), float(lon or 0))
+        if not b64:
+            return ""
+        return (f'<img src="data:image/jpeg;base64,{b64}" class="chip" '
+                f'onclick="toggleChip(this)" title="Click to enlarge · NAIP chip · YOLO bbox">')
+
+    total_min   = sum(_dur(bl) for bl in legs)
+    origin_name = legs[0].get("from", "") if legs else ""
+    dest_name   = legs[-1].get("to",   "") if legs else ""
+    conf_num    = "SR-" + hashlib.md5(f"{origin_name}{dest_name}{total_min}".encode()).hexdigest()[:6].upper()
+    trip_id     = "TRP-" + hashlib.md5(f"trip{conf_num}".encode()).hexdigest()[:8].upper()
+    now         = datetime.now()
+    date_str    = now.strftime("%b %d, %Y")
+    time_str    = now.strftime("%I:%M %p")
+
+
+    # ── Build legs HTML ────────────────────────────────────────────────────────
+    legs_html = ""
+    n_legs = len(legs)
+    for li, bl in enumerate(legs):
+        mode = bl["mode"]
+        dur  = _dur(bl)
+        is_last = (li == n_legs - 1)
+        leg_num = li + 1
+
+        vline = "" if is_last else '<div class="vline"></div>'
+
+        if mode == "walk":
+            lat, lon = bl.get("pickup_lat",""), bl.get("pickup_lon","")
+            maps_url = f"https://maps.google.com/?q={lat},{lon}&z=18" if lat else ""
+            mly_id   = bl.get("pickup_mly_id","")
+            mly_url  = (f"https://www.mapillary.com/app/?pKey={mly_id}" if mly_id
+                        else (f"https://www.mapillary.com/app/?lat={lat}&lng={lon}&z=17" if lat else ""))
+            card = f"""
+              <div class="mode-lbl">WALK</div>
+              <div class="leg-route">{_esc(bl.get('from',''))} → {_esc(bl.get('to',''))}</div>
+              <div class="leg-sub">📍 Distance: {bl.get('dist_km','')} km</div>
+              <div class="leg-links">{" &nbsp;·&nbsp; ".join(filter(None,[_a(maps_url,"📍 Maps"),_a(mly_url,"📷 Street")]))}</div>"""
+
+        elif mode == "rideshare":
+            rs   = bl.get("rideshare", {})
+            fare = rs.get("fare_range","")
+            lat, lon = bl.get("pickup_lat",""), bl.get("pickup_lon","")
+            maps_url = f"https://maps.google.com/?q={lat},{lon}&z=18" if lat else ""
+            mly_id   = bl.get("pickup_mly_id","")
+            mly_url  = (f"https://www.mapillary.com/app/?pKey={mly_id}" if mly_id
+                        else (f"https://www.mapillary.com/app/?lat={lat}&lng={lon}&z=17" if lat else ""))
+            pickup_lbl = bl.get("from","") if li == 0 else ""
+            dropoff_lbl = bl.get("to","") if not pickup_lbl else ""
+            sub = (f'📍 Pick-up: {_esc(pickup_lbl)}' if pickup_lbl
+                   else f'📍 Drop-off: {_esc(dropoff_lbl)}')
+            fare_html = f'<span class="fare-badge">{_esc(fare)}</span>' if fare else ""
+            card = f"""
+              <div class="mode-lbl-row"><span class="mode-lbl">CAR</span>{fare_html}</div>
+              <div class="leg-route">{_esc(bl.get('from',''))} → {_esc(bl.get('to',''))}</div>
+              <div class="leg-sub">{sub}</div>
+              <div class="leg-links">{" &nbsp;·&nbsp; ".join(filter(None,[_a(maps_url,"📍 Maps"),_a(mly_url,"📷 Street")]))}</div>"""
+
+        elif mode == "helicopter":
+            dep = bl["departure_helipad"]
+            arr = bl["arrival_helipad"]
+            dist = bl.get("dist_km","")
+
+            metar_html = ""
+            metar = bl.get("metar_dep")
+            if metar:
+                cat = metar.get("flight_category","")
+                col = {"VFR":"#16a34a","MVFR":"#2563eb","IFR":"#dc2626","LIFR":"#7e22ce"}.get(cat,"")
+                if col:
+                    metar_html = f'<span class="metar-b" style="background:{col}">{cat}</span>'
+
+            def _pad_links(pad, lat_key="lat", lon_key="lon"):
+                plat, plon = pad.get("lat",""), pad.get("lon","")
+                gm  = pad.get("gmaps_url") or (f"https://maps.google.com/?q={plat},{plon}&z=18" if plat else "")
+                mid = pad.get("mly_image_id","")
+                ml  = (f"https://www.mapillary.com/app/?pKey={mid}" if mid
+                       else (f"https://www.mapillary.com/app/?lat={plat}&lng={plon}&z=17" if plat else ""))
+                return " &nbsp;·&nbsp; ".join(filter(None,[_a(gm,"📍 Maps"),_a(ml,"📷 Street")]))
+
+            dep_thumb = _thumb(dep.get("ident","") or "", dep.get("osm_id","") or "",
+                               dep.get("lat", 0), dep.get("lon", 0))
+            arr_thumb = _thumb(arr.get("ident","") or "", arr.get("osm_id","") or "",
+                               arr.get("lat", 0), arr.get("lon", 0))
+
+            card = f"""
+              <div class="mode-lbl-row">
+                <span class="mode-lbl">FLY</span>{metar_html}
+              </div>
+              <div class="leg-route">{_pad_label(dep, short=True)} → {_pad_label(arr, short=True)}</div>
+              <div class="leg-sub">✈ Distance: {dist} km</div>
+              <div class="heli-body">
+                <div class="dep-arr">
+                  <div class="da-col">
+                    <div class="da-lbl">DEP</div>
+                    <div class="da-thumb-row">
+                      {dep_thumb}
+                      <div>
+                        <div class="da-name">{_pad_label(dep)}</div>
+                        <div class="da-links">{_pad_links(dep)}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="da-divider"></div>
+                  <div class="da-col">
+                    <div class="da-lbl">ARR</div>
+                    <div class="da-thumb-row">
+                      {arr_thumb}
+                      <div>
+                        <div class="da-name">{_pad_label(arr)}</div>
+                        <div class="da-links">{_pad_links(arr)}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>"""
+        else:
+            card = ""
+
+        icon = {"walk":"🚶","rideshare":"🚗","helicopter":"🚁"}.get(mode,"🔵")
+        legs_html += f"""
+<div class="leg-row">
+  <div class="leg-time">{vline}
+    <div class="leg-dur">{dur}</div>
+    <div class="leg-unit">min</div>
+    <div class="leg-badge">LEG {leg_num}</div>
+  </div>
+  <div class="mode-dot">{icon}</div>
+  <div class="leg-card">{card}</div>
+</div>"""
+
+    # ── Footer waypoint flow ──────────────────────────────────────────────────
+    waypoints, icons_between = [], []
+    if legs:
+        waypoints.append(_esc(legs[0].get("from","Origin"))[:22])
+    for bl in legs:
+        if bl["mode"] == "helicopter":
+            dep = bl["departure_helipad"]
+            arr = bl["arrival_helipad"]
+            dn  = ((dep.get("name") or dep.get("ident") or "Helipad")).split("(")[0].strip()[:18]
+            an  = ((arr.get("name") or arr.get("ident") or "Helipad")).split("(")[0].strip()[:18]
+            if waypoints[-1] != _esc(dn):
+                icons_between.append("🚗"); waypoints.append(_esc(dn))
+            icons_between.append("🚁"); waypoints.append(_esc(an))
+    if legs:
+        last = _esc(legs[-1].get("to","Destination"))[:22]
+        if waypoints[-1] != last:
+            icons_between.append("🚗"); waypoints.append(last)
+
+    flow_html = f'<span class="wp">{waypoints[0]}</span>' if waypoints else ""
+    for ic, wp in zip(icons_between, waypoints[1:]):
+        flow_html += f'<span class="flow-ic">{ic}</span><span class="wp">{wp}</span>'
+
+    # Load real QR code PNG as base64 for embedding in iframe
+    import base64 as _b64, pathlib as _pl
+    _qr_path = _pl.Path(__file__).parent / "assets" / "qr_github.png"
+    _qr_b64 = _b64.b64encode(_qr_path.read_bytes()).decode() if _qr_path.exists() else ""
+
+    # Accurate height: header(90) + info-bar(66) + footer(76) + main + chip-expand buffer(150).
+    # Helicopter card min ~225px (chip 96px + dep/arr labels + padding).
+    # main = max(QR column min 310px, legs height).
+    _per_leg_h = sum(225 if bl["mode"] == "helicopter" else 118 for bl in legs)
+    _main_h    = max(24 + _per_leg_h, 310)
+    est_h      = 90 + 66 + _main_h + 76 + 150
+
+    CSS = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:transparent;font-family:'Segoe UI',system-ui,sans-serif;padding:4px 2px}
+.ticket{background:#0c1526;border:1px solid rgba(30,80,160,.45);border-radius:12px;overflow:hidden;color:#e2e8f0}
+
+/* ── Header ── */
+.hdr{background:linear-gradient(135deg,#0f1d38 0%,#0c1930 100%);
+     border-bottom:1px solid rgba(30,80,160,.3);
+     padding:18px 22px 16px;display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+.hdr-l{display:flex;gap:14px;align-items:flex-start}
+.hdr-icon{width:52px;height:52px;border-radius:10px;border:1.5px solid #0ea5e9;
+          display:flex;align-items:center;justify-content:center;font-size:24px;
+          background:rgba(14,165,233,.1);flex-shrink:0}
+.trip-type{font-size:11px;font-weight:700;color:#0ea5e9;letter-spacing:.12em;margin-bottom:4px}
+.route-title{font-size:22px;font-weight:800;color:#f0f4f8;line-height:1.2;margin-bottom:5px}
+.passenger{font-size:14px;color:#94a3b8;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.passenger strong{color:#e2e8f0}
+.member-id{font-size:12px;color:#94a3b8;letter-spacing:.04em;margin-left:6px;margin-top:3px}
+.plat-badge{margin-top:3px;
+  display:inline-flex;align-items:center;gap:4px;
+  background:linear-gradient(135deg,#8e9eab 0%,#c5c8cc 35%,#e8eaec 55%,#b0b5bb 75%,#8e9eab 100%);
+  color:#1a1f2e;font-size:10px;font-weight:800;letter-spacing:.12em;
+  padding:2px 8px;border-radius:3px;text-transform:uppercase;
+  box-shadow:0 1px 3px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.6);
+  border:1px solid #a0a8b0;white-space:nowrap;
+}
+.conf-badge{background:#1d4ed8;border-radius:10px;padding:11px 16px;
+            display:flex;align-items:center;gap:10px;flex-shrink:0}
+.conf-check{width:34px;height:34px;border-radius:50%;border:2px solid #93c5fd;
+            display:flex;align-items:center;justify-content:center;
+            font-size:17px;color:#93c5fd;font-weight:700}
+.conf-title{font-size:16px;font-weight:800;color:#fff;letter-spacing:.05em}
+.conf-sub{font-size:12px;color:#93c5fd;margin-top:2px}
+
+/* ── Info bar ── */
+.info-bar{background:#0f1e32;border-bottom:1px solid rgba(30,80,160,.25);
+          padding:13px 22px;display:flex;gap:0}
+.ii{flex:1;display:flex;align-items:center;gap:10px;padding:0 16px}
+.ii:first-child{padding-left:0}
+.isep{width:1px;background:rgba(30,80,160,.4);margin:4px 0}
+.ii-icon{font-size:20px}
+.ii-lbl{font-size:10px;font-weight:700;color:#64748b;letter-spacing:.1em;text-transform:uppercase}
+.ii-val{font-size:18px;font-weight:700;color:#f0f4f8;margin-top:1px}
+
+/* ── Main two-column ── */
+.main{display:flex}
+.legs-col{flex:1;padding:16px 18px 8px;border-right:1px solid rgba(30,80,160,.25);min-width:0}
+.qr-col{width:210px;flex-shrink:0;padding:18px 14px;display:flex;flex-direction:column;align-items:center;gap:6px}
+
+/* ── Timeline ── */
+.leg-row{display:flex;align-items:flex-start;gap:0;margin-bottom:4px}
+.leg-time{width:62px;flex-shrink:0;text-align:center;padding-top:4px;position:relative}
+.vline{position:absolute;left:50%;top:38px;bottom:-20px;width:2px;
+       border-left:2px dashed rgba(14,165,233,.3);transform:translateX(-50%)}
+.leg-dur{font-size:22px;font-weight:800;color:#f0f4f8;line-height:1}
+.leg-unit{font-size:11px;color:#64748b;margin-top:1px}
+.leg-badge{display:inline-block;margin-top:5px;background:rgba(14,165,233,.14);
+           border:1px solid #0ea5e9;border-radius:4px;
+           font-size:10px;font-weight:700;color:#0ea5e9;padding:1px 5px;letter-spacing:.06em}
+.mode-dot{width:40px;height:40px;border-radius:50%;
+          background:rgba(14,165,233,.1);border:1.5px solid rgba(14,165,233,.4);
+          display:flex;align-items:center;justify-content:center;font-size:18px;
+          flex-shrink:0;margin:2px 12px 0}
+.leg-card{flex:1;background:#0f1e32;border:1px solid rgba(30,80,160,.3);
+          border-radius:8px;padding:11px 14px;margin-bottom:12px;min-width:0}
+.mode-lbl{font-size:11px;font-weight:700;color:#0ea5e9;letter-spacing:.12em;
+          text-transform:uppercase;margin-bottom:4px}
+.mode-lbl-row{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.leg-route{font-size:17px;font-weight:700;color:#f0f4f8;line-height:1.3;margin-bottom:4px}
+.leg-sub{font-size:13px;color:#94a3b8;margin-bottom:6px}
+.fare-badge{background:rgba(14,165,233,.12);border:1px solid rgba(14,165,233,.35);
+            border-radius:5px;font-size:14px;font-weight:700;color:#e2e8f0;padding:2px 10px}
+.metar-b{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;color:#fff}
+.leg-links{font-size:13px;margin-top:2px}
+.leg-links a{color:#38bdf8;text-decoration:none;margin-right:12px}
+.leg-links a:hover{text-decoration:underline}
+.ident{color:#64748b;font-size:.85em}
+
+/* ── DEP / ARR ── */
+.heli-body{margin-top:10px;border-top:1px solid rgba(30,80,160,.25);padding-top:10px}
+.dep-arr{display:grid;grid-template-columns:1fr 1px 1fr;gap:12px}
+.da-divider{background:rgba(30,80,160,.3)}
+.da-lbl{font-size:11px;font-weight:700;color:#0ea5e9;letter-spacing:.1em;
+        text-transform:uppercase;margin-bottom:6px}
+.da-thumb-row{display:flex;align-items:flex-start;gap:8px}
+.da-name{font-size:14px;font-weight:600;color:#e2e8f0;line-height:1.3}
+.da-links{font-size:12px;margin-top:4px}
+.da-links a{color:#38bdf8;text-decoration:none;margin-right:10px}
+.da-links a:hover{text-decoration:underline}
+
+/* ── Chip ── */
+.chip{width:96px;height:96px;min-width:96px;border-radius:6px;
+      border:2px solid #22c55e;cursor:zoom-in;display:block;object-fit:cover;
+      transition:width .2s ease,height .2s ease,border-radius .2s ease}
+.chip.big{width:220px;height:220px;border-radius:8px;cursor:zoom-out}
+
+/* ── QR side ── */
+.qr-id-lbl{font-size:10px;font-weight:700;color:#0ea5e9;letter-spacing:.12em;text-transform:uppercase}
+.qr-id-val{font-size:14px;font-weight:700;color:#f0f4f8;margin-bottom:8px}
+canvas{border-radius:6px;border:1px solid rgba(30,80,160,.4);cursor:pointer;transition:opacity .15s}
+canvas:hover{opacity:.85}
+.qr-scan-lbl{font-size:11px;font-weight:700;color:#0ea5e9;letter-spacing:.08em;
+             text-transform:uppercase;text-align:center;margin-top:6px}
+.qr-scan-sub{font-size:11px;color:#64748b;text-align:center}
+.qr-book-lbl{font-size:10px;font-weight:700;color:#0ea5e9;letter-spacing:.1em;
+             text-transform:uppercase;margin-top:10px;text-align:center}
+.qr-book-val{font-size:12px;color:#94a3b8;text-align:center}
+
+/* ── Footer ── */
+.footer{border-top:1px solid rgba(30,80,160,.25);background:#0f1e32;
+        padding:13px 22px;display:grid;grid-template-columns:1fr auto 1fr;gap:16px;align-items:center}
+.ft-tag .ft-title{font-size:12px;font-weight:700;color:#0ea5e9;letter-spacing:.08em;margin-bottom:5px}
+.ft-tag p{font-size:15px;font-weight:500;color:#cbd5e1;line-height:1.5;letter-spacing:.01em}
+.ft-tag p em{color:#0ea5e9;font-style:normal;font-weight:700}
+.ft-flow{display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;white-space:nowrap;flex-wrap:wrap;justify-content:center}
+.wp{color:#e2e8f0;font-weight:600}
+.flow-ic{color:#0ea5e9;margin:0 2px;font-size:14px}
+.ft-sup{text-align:right}
+.ft-sup .ft-title{font-size:11px;font-weight:700;color:#0ea5e9;letter-spacing:.06em;text-transform:uppercase;margin-bottom:3px}
+.ft-sup p{font-size:12px;color:#64748b}
+
+"""
+
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body>
+<div class="ticket">
+
+  <div class="hdr">
+    <div class="hdr-l">
+      <div class="hdr-icon">🗺️</div>
+      <div>
+        <div class="trip-type">MULTIMODAL TRIP</div>
+        <div class="route-title">{_esc(origin_name)} → {_esc(dest_name)}</div>
+        <div class="passenger">
+          Passenger: <strong>Miles Urban</strong>
+          <span class="member-id">SKY-7741203</span>
+          <span class="plat-badge">★ Platinum</span>
+        </div>
+      </div>
+    </div>
+    <div class="conf-badge">
+      <div class="conf-check">✓</div>
+      <div>
+        <div class="conf-title">CONFIRMED</div>
+        <div class="conf-sub">Your trip is booked</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-bar">
+    <div class="ii"><div class="ii-icon">🎫</div><div><div class="ii-lbl">BOOKING REF</div><div class="ii-val">{conf_num}</div></div></div>
+    <div class="isep"></div>
+    <div class="ii"><div class="ii-icon">⏱</div><div><div class="ii-lbl">TOTAL TIME</div><div class="ii-val">{total_min} min</div></div></div>
+    <div class="isep"></div>
+    <div class="ii"><div class="ii-icon">📅</div><div><div class="ii-lbl">DATE</div><div class="ii-val">{date_str}</div></div></div>
+    <div class="isep"></div>
+    <div class="ii"><div class="ii-icon">☎️</div><div><div class="ii-lbl">SUPPORT</div><div class="ii-val">+1 (800) 555-0199</div></div></div>
+  </div>
+
+  <div class="main">
+    <div class="legs-col">{legs_html}</div>
+    <div class="qr-col">
+      <div class="qr-id-lbl">TRIP ID</div>
+      <div class="qr-id-val">{trip_id}</div>
+      <img src="data:image/png;base64,{_qr_b64}"
+           width="168" height="168" class="qr-canvas"
+           onclick="window.open('https://github.com/Technion-LBS-Course/ziv/tree/main','_blank')"
+           title="Open SkyRoute on GitHub"
+           style="display:block;object-fit:contain;background:#fff;border-radius:6px;border:1px solid rgba(30,80,160,.4);cursor:pointer;transition:opacity .15s"
+           onmouseover="this.style.opacity='.85'" onmouseout="this.style.opacity='1'">
+      <div class="qr-scan-lbl">SCAN ME</div>
+      <div class="qr-scan-sub">Opens SkyRoute on GitHub</div>
+      <div class="qr-book-lbl">BOOKED ON</div>
+      <div class="qr-book-val">{date_str} &nbsp;·&nbsp; {time_str}</div>
+    </div>
+  </div>
+
+
+  <div class="footer">
+    <div class="ft-tag">
+      <div class="ft-title">SAFE. FAST. SEAMLESS.</div>
+      <p>Thank you for choosing <em>SkyRoute</em> —<br>Door-to-sky-to-door. Your fastest path, elevated.</p>
+    </div>
+    <div class="ft-flow">{flow_html}</div>
+    <div class="ft-sup">
+      <div class="ft-title">NEED TO MAKE CHANGES?</div>
+      <p>Manage your trip, view details,<br>or get support anytime.</p>
+    </div>
+  </div>
+
+</div>
+<script>
+function toggleChip(el){{el.classList.toggle('big');el.style.cursor=el.classList.contains('big')?'zoom-out':'zoom-in';}}
+</script>
+</body></html>"""
+
+    components.html(html, height=est_h, scrolling=False)
+
+
+def _render_weather_card(data: dict) -> None:
+    """Render a detailed weather forecast card via components.html."""
+    import html as _html
+
+    def _esc(s: object) -> str:
+        return _html.escape(str(s))
+
+    def _icon(conditions: str, is_daytime: bool = True) -> str:
+        c = conditions.lower()
+        if "thunder" in c:                                   return "⛈️"
+        if "blizzard" in c or "snow" in c:                  return "❄️"
+        if "fog" in c or "haze" in c:                       return "🌫️"
+        if "drizzle" in c:                                   return "🌦️"
+        if "rain" in c or "shower" in c:
+            return "🌦️" if ("chance" in c or "slight" in c) else "🌧️"
+        if "windy" in c or "breezy" in c:                   return "💨"
+        if "overcast" in c or "mostly cloudy" in c:         return "🌥️"
+        if "partly cloudy" in c or "partly sunny" in c:     return "⛅"
+        if "mostly sunny" in c or "few clouds" in c:        return "🌤️"
+        if "sunny" in c or "clear" in c:
+            return "☀️" if is_daytime else "🌙"
+        return "🌤️"
+
+    loc        = _esc(data.get("location", ""))
+    cond       = data.get("conditions", "")
+    temp_label = data.get("temp_label", "°F")
+    wind_label = data.get("wind_label", "mph")
+    metric     = (data.get("units", "imperial") == "metric")
+    disp_temp  = data.get("temperature_c" if metric else "temperature_f", "—")
+    wind       = _esc(data.get("wind", "—"))
+    prec       = data.get("precip_chance", 0)
+    detail     = _esc((data.get("detailed", "") or "")[:200])
+    main_ico   = _icon(cond, True)
+    cond_esc   = _esc(cond)
+
+    periods = data.get("periods", [])
+    period_cols = ""
+    for p in periods[:4]:
+        p_ico  = _icon(p.get("conditions", ""), p.get("is_daytime", True))
+        p_temp = p.get("temperature_c" if metric else "temperature_f", "—")
+        p_name = _esc(p.get("name", ""))
+        p_cond = _esc(p.get("conditions", ""))
+        p_prec = p.get("precip_chance", 0)
+        prec_row = (f'<div class="p-prec">💧 {p_prec}%</div>' if p_prec >= 10 else "")
+        period_cols += f"""
+        <div class="period">
+          <div class="p-name">{p_name}</div>
+          <div class="p-icon">{p_ico}</div>
+          <div class="p-cond">{p_cond}</div>
+          <div class="p-temp">{p_temp}{temp_label}</div>
+          {prec_row}
+        </div>"""
+
+    css = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:transparent;font-family:'Segoe UI',system-ui,sans-serif;padding:4px 2px}
+.card{background:#0c1526;border:1px solid rgba(30,80,160,.45);border-radius:14px;
+      overflow:hidden;color:#e2e8f0}
+/* header */
+.hdr{background:linear-gradient(135deg,#0f1d38 0%,#0c1930 100%);
+     border-bottom:1px solid rgba(30,80,160,.3);
+     padding:14px 22px;display:flex;justify-content:space-between;align-items:center}
+.hdr-loc{display:flex;align-items:center;gap:10px;font-size:22px;font-weight:800;color:#f0f4f8}
+.hdr-upd{font-size:12px;color:#64748b}
+/* two-column body */
+.body{display:flex}
+.left{flex:0 0 230px;background:#0f1d38;border-right:1px solid rgba(30,80,160,.3);padding:20px 18px}
+.cur-lbl{font-size:10px;font-weight:700;color:#0ea5e9;letter-spacing:.12em;
+         text-transform:uppercase;margin-bottom:14px}
+.cur-main{display:flex;align-items:center;gap:14px;margin-bottom:8px}
+.cur-ico{font-size:52px;line-height:1}
+.cur-temp{font-size:46px;font-weight:800;color:#f0f4f8;line-height:1}
+.cur-unit{font-size:18px;color:#94a3b8;font-weight:600}
+.cur-cond{font-size:15px;color:#94a3b8;margin-bottom:16px;padding-left:2px}
+.stats{display:flex;flex-direction:column;gap:9px;
+       border-top:1px solid rgba(30,80,160,.25);padding-top:14px}
+.stat{display:flex;align-items:center;gap:9px;font-size:13px}
+.si{font-size:16px;width:20px;text-align:center}
+.sl{color:#64748b;min-width:40px}
+.sv{color:#e2e8f0;font-weight:600}
+/* forecast */
+.right{flex:1;padding:18px 20px 14px}
+.fc-hdr{font-size:15px;font-weight:700;color:#f0f4f8;margin-bottom:14px}
+.periods{display:flex;gap:8px}
+.period{flex:1;background:#0a1525;border:1px solid rgba(30,80,160,.3);border-radius:10px;
+        padding:12px 6px;text-align:center;min-width:0;display:flex;flex-direction:column;align-items:center}
+.p-name{font-size:10px;font-weight:700;color:#0ea5e9;letter-spacing:.06em;
+        text-transform:uppercase;margin-bottom:8px;line-height:1.25}
+.p-icon{font-size:26px;margin-bottom:8px;line-height:1}
+.p-cond{font-size:11px;color:#94a3b8;margin-bottom:8px;line-height:1.3;flex:1}
+.p-temp{font-size:19px;font-weight:800;color:#f0f4f8}
+.p-prec{font-size:11px;color:#38bdf8;margin-top:4px}
+/* bottom bar */
+.bot{border-top:1px solid rgba(30,80,160,.25);background:#0a1422;
+     padding:12px 22px;display:flex;align-items:center;gap:0}
+.bi{display:flex;align-items:center;gap:8px;padding:0 16px;flex-shrink:0}
+.bi:first-child{padding-left:0}
+.bsep{width:1px;background:rgba(30,80,160,.4);height:28px;flex-shrink:0}
+.bi-ico{font-size:22px}
+.bi-lbl{font-size:10px;font-weight:700;color:#64748b;letter-spacing:.08em;text-transform:uppercase;line-height:1.3}
+.bi-val{font-size:15px;font-weight:700;color:#e2e8f0;line-height:1.3}
+.adv{flex:1;padding-left:16px;font-size:12px;color:#94a3b8;line-height:1.45;
+     border-left:1px solid rgba(30,80,160,.3)}
+.adv strong{color:#e2e8f0;font-size:12px;font-weight:700;display:block;margin-bottom:2px}
+"""
+
+    html_out = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>{css}</style></head><body>
+<div class="card">
+  <div class="hdr">
+    <div class="hdr-loc">📍 {loc}</div>
+    <div class="hdr-upd">Updated just now &nbsp;↻</div>
+  </div>
+  <div class="body">
+    <div class="left">
+      <div class="cur-lbl">Current Conditions</div>
+      <div class="cur-main">
+        <div class="cur-ico">{main_ico}</div>
+        <div class="cur-temp">{disp_temp}<span class="cur-unit">{temp_label}</span></div>
+      </div>
+      <div class="cur-cond">{cond_esc}</div>
+      <div class="stats">
+        <div class="stat"><span class="si">💨</span><span class="sl">Wind</span><span class="sv">{wind}</span></div>
+        <div class="stat"><span class="si">🌧️</span><span class="sl">Rain</span><span class="sv">{prec}%</span></div>
+      </div>
+    </div>
+    <div class="right">
+      <div class="fc-hdr">Forecast</div>
+      <div class="periods">{period_cols}</div>
+    </div>
+  </div>
+  <div class="bot">
+    <div class="bi"><span class="bi-ico">☂️</span>
+      <div><div class="bi-lbl">Rain Prob.</div><div class="bi-val">{prec}%</div></div>
+    </div>
+    <div class="bsep"></div>
+    <div class="bi"><span class="bi-ico">💨</span>
+      <div><div class="bi-lbl">Wind</div><div class="bi-val">{wind}</div></div>
+    </div>
+    <div class="bsep"></div>
+    <div class="adv"><strong>Forecast detail</strong>{detail}</div>
+  </div>
+</div>
+</body></html>"""
+
+    components.html(html_out, height=440, scrolling=False)
+
+
+def _render_places_card(data: dict) -> None:
+    """Render a TomTom POI search result card via components.html."""
+    import html as _html
+
+    def _esc(s: object) -> str:
+        return _html.escape(str(s))
+
+    _ICONS = {
+        "restaurant": "🍽️", "dining": "🍽️", "fine dining": "🍽️",
+        "steakhouse": "🥩", "sushi": "🍣", "pizza": "🍕", "italian": "🍝",
+        "coffee": "☕", "cafe": "☕", "espresso": "☕",
+        "bar": "🍸", "cocktail": "🍸", "pub": "🍺", "brewery": "🍺",
+        "hotel": "🏨", "accommodation": "🏨", "motel": "🏨",
+        "gym": "💪", "fitness": "💪", "yoga": "🧘",
+        "pharmacy": "💊", "drugstore": "💊",
+        "hospital": "🏥", "clinic": "🏥", "medical": "🏥",
+        "grocery": "🛒", "supermarket": "🛒", "market": "🛒",
+        "gas": "⛽", "fuel": "⛽",
+        "parking": "🅿️",
+        "bank": "🏦", "atm": "🏦",
+        "airport": "✈️", "helipad": "🚁",
+        "spa": "💆", "salon": "✂️",
+        "cinema": "🎬", "theater": "🎭", "museum": "🏛️",
+        "bookstore": "📚", "library": "📚",
+    }
+
+    cat_raw  = data.get("category", "place")
+    cat_low  = cat_raw.lower()
+    icon     = next((v for k, v in _ICONS.items() if k in cat_low), "📍")
+    loc_esc  = _esc(data.get("location", ""))
+    cat_esc  = _esc(cat_raw.title())
+    results  = data.get("results", [])
+    n        = len(results)
+
+    rows_html = ""
+    for i, r in enumerate(results):
+        name    = _esc(r.get("name", ""))
+        addr    = _esc(r.get("address", ""))
+        dist_m  = r.get("distance_m", 0)
+        dist_s  = f"{dist_m / 1000:.1f} km" if dist_m >= 1000 else f"{dist_m} m"
+        phone   = r.get("phone", "")
+        url     = r.get("url", "")
+        hours        = _esc(r.get("hours_today", ""))
+        rating       = r.get("rating")
+        review_count = r.get("review_count")
+        price        = _esc(r.get("price", ""))
+        yelp_url     = r.get("yelp_url", "")
+        sep          = "" if i == 0 else '<div class="row-sep"></div>'
+        ph_html = (f'<a href="tel:{_esc(phone)}" class="pill">📞 {_esc(phone)}</a>'
+                   if phone else "")
+        url_norm = url if url.startswith(("http://", "https://")) else f"https://{url}"
+        url_html = (f'<a href="{_esc(url_norm)}" target="_blank" class="pill">🌐 Website</a>'
+                    if url else "")
+        yelp_html = ""
+        if yelp_url:
+            yelp_norm = yelp_url if yelp_url.startswith(("http://", "https://")) else f"https://{yelp_url}"
+            yelp_html = f'<a href="{_esc(yelp_norm)}" target="_blank" class="pill pill-yelp">Yelp ↗</a>'
+        links      = ph_html + url_html + yelp_html
+        links_row  = f'<div class="r-links">{links}</div>' if links else ""
+        hours_row  = f'<div class="r-hours">🕐 {hours}</div>' if hours else ""
+        if rating is not None:
+            stars_filled = int(rating)
+            stars_half   = 1 if (rating - stars_filled) >= 0.5 else 0
+            stars_empty  = 5 - stars_filled - stars_half
+            stars_str    = "★" * stars_filled + ("½" if stars_half else "") + "☆" * stars_empty
+            rev_txt = f'<span class="r-rev">({review_count:,})</span>' if review_count else ""
+            price_txt = f'<span class="r-price">{price}</span>' if price else ""
+            rating_row = f'<div class="r-rating"><span class="r-stars">{stars_str}</span> {rating}{rev_txt}{price_txt}</div>'
+        else:
+            rating_row = ""
+        rows_html += f"""{sep}
+<div class="result-row">
+  <div class="r-rank">{i + 1}</div>
+  <div class="r-body">
+    <div class="r-name">{name}</div>
+    <div class="r-addr">{addr}</div>
+    {rating_row}
+    {hours_row}
+    {links_row}
+  </div>
+  <div class="r-dist">{dist_s}</div>
+</div>"""
+
+    css = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:transparent;font-family:'Segoe UI',system-ui,sans-serif;padding:4px 2px}
+.card{background:#0c1526;border:1px solid rgba(30,80,160,.45);border-radius:14px;
+      overflow:hidden;color:#e2e8f0}
+.hdr{background:linear-gradient(135deg,#0f1d38 0%,#0c1930 100%);
+     border-bottom:1px solid rgba(30,80,160,.3);
+     padding:14px 22px;display:flex;justify-content:space-between;align-items:center;gap:12px}
+.hdr-l{display:flex;align-items:center;gap:12px}
+.hdr-icon{width:42px;height:42px;border-radius:10px;border:1.5px solid #0ea5e9;
+          background:rgba(14,165,233,.1);display:flex;align-items:center;
+          justify-content:center;font-size:20px;flex-shrink:0}
+.hdr-title{font-size:20px;font-weight:800;color:#f0f4f8}
+.hdr-sub{font-size:13px;color:#64748b;margin-top:2px}
+.hdr-badge{background:rgba(14,165,233,.15);border:1px solid rgba(14,165,233,.35);
+           border-radius:8px;padding:4px 12px;font-size:13px;font-weight:700;
+           color:#38bdf8;white-space:nowrap;flex-shrink:0}
+.body{padding:6px 0 16px}
+.row-sep{height:1px;background:rgba(30,80,160,.2);margin:0 20px}
+.result-row{display:flex;align-items:center;gap:14px;padding:13px 22px}
+.result-row:hover{background:rgba(14,165,233,.04)}
+.r-rank{width:26px;height:26px;border-radius:50%;background:rgba(14,165,233,.12);
+        border:1px solid rgba(14,165,233,.3);display:flex;align-items:center;
+        justify-content:center;font-size:12px;font-weight:700;color:#38bdf8;flex-shrink:0}
+.r-body{flex:1;min-width:0}
+.r-name{font-size:15px;font-weight:700;color:#f0f4f8;margin-bottom:3px;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r-addr{font-size:12px;color:#64748b;margin-bottom:4px;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r-hours{font-size:12px;color:#34d399;margin-bottom:4px}
+.r-rating{font-size:12px;color:#94a3b8;margin-bottom:4px;display:flex;align-items:center;gap:5px}
+.r-stars{color:#fbbf24;letter-spacing:1px;font-size:13px}
+.r-rev{color:#64748b}
+.r-price{color:#34d399;font-weight:700;background:rgba(52,211,153,.1);
+         border:1px solid rgba(52,211,153,.25);border-radius:4px;padding:1px 5px}
+.r-links{display:flex;gap:8px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;
+      border-radius:6px;font-size:11px;font-weight:600;color:#38bdf8;
+      background:rgba(14,165,233,.1);border:1px solid rgba(14,165,233,.25);
+      text-decoration:none;white-space:nowrap}
+.pill:hover{background:rgba(14,165,233,.2)}
+.pill-yelp{color:#f87171;background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.25)}
+.pill-yelp:hover{background:rgba(239,68,68,.2)}
+.r-dist{font-size:13px;font-weight:700;color:#0ea5e9;
+        background:rgba(14,165,233,.1);border:1px solid rgba(14,165,233,.25);
+        border-radius:6px;padding:4px 10px;white-space:nowrap;flex-shrink:0}
+"""
+
+    html_out = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>{css}</style></head><body>
+<div class="card">
+  <div class="hdr">
+    <div class="hdr-l">
+      <div class="hdr-icon">{icon}</div>
+      <div>
+        <div class="hdr-title">{cat_esc} near {loc_esc}</div>
+        <div class="hdr-sub">Powered by TomTom · sorted by distance</div>
+      </div>
+    </div>
+    <div class="hdr-badge">{n} result{'s' if n != 1 else ''}</div>
+  </div>
+  <div class="body">
+    {rows_html}
+  </div>
+</div>
+</body></html>"""
+
+    # Header ~90px; each row: 76px base + extras per optional row
+    est_h = 100 + sum(
+        76
+        + (20 if r.get("rating") is not None else 0)
+        + (20 if r.get("hours_today") else 0)
+        + (28 if (r.get("phone") or r.get("url") or r.get("yelp_url")) else 0)
+        for r in results
+    ) + 20
+    components.html(html_out, height=est_h, scrolling=False)
+
+
+def _render_detailed_itinerary(legs: list[dict]) -> None:
+    """Render the full per-leg booking detail (Mapillary previews, ADIP info, etc.)."""
+    for _bl in legs:
+        if _bl["mode"] == "rideshare":
+            rs = _bl["rideshare"]
+            st.markdown(
+                f"### 🚗 Leg {_bl['leg_index']+1} — Ground Transport"
+                f"  \n**{_bl['from']} → {_bl['to']}**"
+            )
+            _gc1, _gc2, _gc3 = st.columns(3)
+            _gc1.metric("Estimated fare", rs["fare_range"])
+            _gc2.metric("Duration", f"{rs['duration_min']} min")
+            _gc3.metric("Distance", f"{rs['dist_km']} km")
+            st.markdown(
+                f"**Booking ref:** `{rs['booking_ref']}`  \n"
+                f"**Services:** {', '.join(rs['vehicles'])}  \n"
+                f"[📱 Open Uber]({rs['uber_deeplink']}) &nbsp;·&nbsp; "
+                f"[🚗 Waymo One]({rs['waymo_url']})"
+            )
+            st.caption("_Simulated — actual pricing and availability depend on demand._")
+            st.markdown(f"**📍 Pickup — {_bl['from']}**")
+            components.html(
+                _mly_viewer_html(_bl["pickup_lat"], _bl["pickup_lon"],
+                                 image_id=_bl.get("pickup_mly_id", ""),
+                                 thumb_url=_bl.get("pickup_mly_thumb", "")),
+                height=260,
+            )
+            st.markdown(f"**📍 Dropoff — {_bl['to']}**")
+            components.html(
+                _mly_viewer_html(_bl["dropoff_lat"], _bl["dropoff_lon"],
+                                 image_id=_bl.get("dropoff_mly_id", ""),
+                                 thumb_url=_bl.get("dropoff_mly_thumb", "")),
+                height=260,
+            )
+
+        elif _bl["mode"] == "walk":
+            st.markdown(
+                f"### 🚶 Leg {_bl['leg_index']+1} — Walk"
+                f"  \n**{_bl['from']} → {_bl['to']}**"
+            )
+            _wc1, _wc2 = st.columns(2)
+            _wc1.metric("Distance", f"{_bl['dist_km']} km")
+            _wc2.metric("Walk time", f"{_bl['duration_min']} min")
+            st.info(
+                f"Only {_bl['dist_km']} km — no transport needed. "
+                f"Approximately {_bl['duration_min']} min on foot.",
+                icon="🚶",
+            )
+            _wv1, _wv2 = st.columns(2)
+            with _wv1:
+                st.markdown(f"**📍 Start — {_bl['from'].split(':', 1)[-1].strip()}**")
+                components.html(
+                    _mly_viewer_html(_bl["pickup_lat"], _bl["pickup_lon"],
+                                     height=240,
+                                     image_id=_bl.get("pickup_mly_id", ""),
+                                     thumb_url=_bl.get("pickup_mly_thumb", "")),
+                    height=240,
+                )
+            with _wv2:
+                st.markdown(f"**📍 Destination — {_bl['to'].split(':', 1)[-1].strip()}**")
+                components.html(
+                    _mly_viewer_html(_bl["dropoff_lat"], _bl["dropoff_lon"],
+                                     height=240,
+                                     image_id=_bl.get("dropoff_mly_id", ""),
+                                     thumb_url=_bl.get("dropoff_mly_thumb", "")),
+                    height=240,
+                )
+
+        elif _bl["mode"] == "helicopter":
+            dep = _bl["departure_helipad"]
+            arr = _bl["arrival_helipad"]
+            st.markdown(
+                f"### 🚁 Leg {_bl['leg_index']+1} — Helicopter Flight"
+                f"  \n**{dep['name']} → {arr['name']}**  "
+                f"({_bl['dist_km']} km · {_bl['duration_min']} min)"
+            )
+            st.markdown(f"**📋 Departure: {dep['name']} ({dep['ident'] or 'OSM'})**")
+            _dep_badge = _metar_badge(_bl.get("metar_dep"))
+            if _dep_badge:
+                st.markdown(_dep_badge, unsafe_allow_html=True)
+            _hc1, _hc2 = st.columns(2)
+            _hc1.markdown(
+                f"**Status:** {dep.get('status','—')}  \n"
+                f"**City:** {dep.get('servcity','—')}  \n"
+                f"**Ownership:** {dep.get('ownership','—')}  \n"
+                f"**Private use:** {'Yes' if dep.get('private_use') else 'No'}  \n"
+                + (f"**Address:** {dep['address']}  \n" if dep.get('address') else "")
+                + f"**Coordinates:** `{dep['lat']:.5f}, {dep['lon']:.5f}`"
+            )
+            _hc2.markdown(f"**Coordination note:**  \n{dep.get('contact_notes','—')}")
+            if dep.get("adip_url"):
+                st.markdown(f"[📋 Open ADIP record]({dep['adip_url']})")
+            st.markdown(f"[📍 Google Maps ↗]({dep.get('gmaps_url','')})")
+            components.html(
+                _mly_viewer_html(dep["lat"], dep["lon"],
+                                 image_id=dep.get("mly_image_id", ""),
+                                 thumb_url=dep.get("mly_thumb_url", "")),
+                height=260,
+            )
+            st.markdown(f"**📋 Arrival: {arr['name']} ({arr['ident'] or 'OSM'})**")
+            _arr_badge = _metar_badge(_bl.get("metar_arr"))
+            if _arr_badge:
+                st.markdown(_arr_badge, unsafe_allow_html=True)
+            _ac1, _ac2 = st.columns(2)
+            _ac1.markdown(
+                f"**Status:** {arr.get('status','—')}  \n"
+                f"**City:** {arr.get('servcity','—')}  \n"
+                f"**Ownership:** {arr.get('ownership','—')}  \n"
+                f"**Private use:** {'Yes' if arr.get('private_use') else 'No'}  \n"
+                + (f"**Address:** {arr['address']}  \n" if arr.get('address') else "")
+                + f"**Coordinates:** `{arr['lat']:.5f}, {arr['lon']:.5f}`"
+            )
+            _ac2.markdown(f"**Coordination note:**  \n{arr.get('contact_notes','—')}")
+            if arr.get("adip_url"):
+                st.markdown(f"[📋 Open ADIP record]({arr['adip_url']})")
+            st.markdown(f"[📍 Google Maps ↗]({arr.get('gmaps_url','')})")
+            components.html(
+                _mly_viewer_html(arr["lat"], arr["lon"],
+                                 image_id=arr.get("mly_image_id", ""),
+                                 thumb_url=arr.get("mly_thumb_url", "")),
+                height=260,
+            )
+
+
 @_fragment
 def _route_assistant_content() -> None:
     """Render the Route Assistant tab as an isolated fragment.
@@ -4704,12 +5916,42 @@ def _route_assistant_content() -> None:
     if "_agent_helipads" not in st.session_state:
         faa_raw, _ = load_data()
         _agent_faa = faa_raw.dropna(subset=["lat", "lon"])
+
+        # Mirror the exact same filter used for the green "HIE Validated" map layer:
+        # YOLO visually confirmed (gt=1 in inspector_results.csv) OR ADIP-operational
+        # within the last year. This ensures every routable pad has a NAIP chip and
+        # matches what the user sees on the map.
+        _insp_df = _load_inspector_df()
+        _val_idents: set[str] = set()
+        if not _insp_df.empty and "gt" in _insp_df.columns:
+            _val_idents = set(_insp_df[_insp_df["gt"] == 1]["ident"].str.upper())
+        # ADIP fallback: operationally active + inspected within last year
+        if "operational" in _agent_faa.columns and "data_freshness_days" in _agent_faa.columns:
+            _adip_fb = _agent_faa[
+                (_agent_faa["operational"] == 1) &
+                (_agent_faa["data_freshness_days"].fillna(9999) <= 365)
+            ]["IDENT"].dropna().str.upper()
+            _val_idents = _val_idents | set(_adip_fb)
+
+        if _val_idents:
+            _agent_faa = _agent_faa[_agent_faa["IDENT"].str.upper().isin(_val_idents)]
+
+        def _s(val) -> str | None:
+            """NaN-safe string: returns None for missing/nan values."""
+            if val is None:
+                return None
+            import math as _math
+            if isinstance(val, float) and _math.isnan(val):
+                return None
+            s = str(val).strip()
+            return s if s and s.lower() != "nan" else None
+
         _pool: list[dict] = [
             {
                 "lat":   float(r["lat"]),
                 "lon":   float(r["lon"]),
-                "name":  str(r.get("NAME", "") or "").strip() or None,
-                "ident": str(r.get("IDENT", "") or "").strip() or None,
+                "name":  _s(r.get("NAME")),
+                "ident": _s(r.get("IDENT")),
             }
             for r in _agent_faa.to_dict("records")
         ]
@@ -4719,10 +5961,11 @@ def _route_assistant_content() -> None:
             _confirmed = _osm_val[_osm_val["hie_visual_detected"]].dropna(subset=["lat", "lon"])
             for r in _confirmed.to_dict("records"):
                 _pool.append({
-                    "lat":   float(r["lat"]),
-                    "lon":   float(r["lon"]),
-                    "name":  str(r.get("name", "") or "").strip() or None,
-                    "ident": None,  # OSM-only pads have no FAA IDENT
+                    "lat":    float(r["lat"]),
+                    "lon":    float(r["lon"]),
+                    "name":   _s(r.get("name")),
+                    "ident":  None,
+                    "osm_id": _s(r.get("osm_id")) or "",
                 })
         st.session_state["_agent_helipads"] = _pool
     _agent_helipads: list[dict] = st.session_state["_agent_helipads"]
@@ -4748,6 +5991,10 @@ def _route_assistant_content() -> None:
         st.session_state["_agent_llm_history"] = []
     if "_agent_booking_legs" not in st.session_state:
         st.session_state["_agent_booking_legs"] = []
+    if "_agent_booking_legs_display" not in st.session_state:
+        st.session_state["_agent_booking_legs_display"] = []
+    if "_agent_booking_detail_legs" not in st.session_state:
+        st.session_state["_agent_booking_detail_legs"] = []
     # _agent_last_route: persists the most recently computed route for booking
     # and for auto-triggering the routing simulator in the EDA tab
 
@@ -4756,124 +6003,49 @@ def _route_assistant_content() -> None:
         with st.chat_message(_msg["role"]):
             st.markdown(_msg["content"])
 
-    # ── Booking leg cards — rendered from session state so they survive the booking
-    # rerun. Cleared immediately after rendering so they don't re-appear on
-    # subsequent non-booking queries (restaurant search, weather, etc.).
-    _booking_legs_snapshot = list(st.session_state["_agent_booking_legs"])
-    if _booking_legs_snapshot:
+    # ── Booking cards — 2-stage display ──────────────────────────────────────
+    # Stage 1 (always): compact quick-itinerary card + "Detailed Itinerary" toggle.
+    # Stage 2 (on demand): full per-leg detail with Mapillary previews, ADIP info.
+    #
+    # _agent_booking_legs: trigger key set by the agent result handler; consumed
+    #   once here to populate _agent_booking_legs_display.
+    # _agent_booking_legs_display: persists until the next user message so the
+    #   card survives fragment reruns triggered by the toggle button.
+    if st.session_state.get("_agent_booking_legs"):
+        st.session_state["_agent_booking_legs_display"] = st.session_state["_agent_booking_legs"]
         st.session_state["_agent_booking_legs"] = []
-    for _bl in _booking_legs_snapshot:
-        if _bl["mode"] == "rideshare":
-            rs = _bl["rideshare"]
-            st.markdown(
-                f"### 🚗 Leg {_bl['leg_index']+1} — Ground Transport"
-                f"  \n**{_bl['from']} → {_bl['to']}**"
-            )
-            _gc1, _gc2, _gc3 = st.columns(3)
-            _gc1.metric("Estimated fare", rs["fare_range"])
-            _gc2.metric("Duration", f"{rs['duration_min']} min")
-            _gc3.metric("Distance", f"{rs['dist_km']} km")
-            st.markdown(
-                f"**Booking ref:** `{rs['booking_ref']}`  \n"
-                f"**Services:** {', '.join(rs['vehicles'])}  \n"
-                f"[📱 Open Uber]({rs['uber_deeplink']}) &nbsp;·&nbsp; "
-                f"[🚗 Waymo One]({rs['waymo_url']})"
-            )
-            st.caption("_Simulated — actual pricing and availability depend on demand._")
-            with st.expander(f"📍 Pickup — {_bl['from']}", expanded=True):
-                components.html(
-                    _mly_viewer_html(_bl["pickup_lat"], _bl["pickup_lon"],
-                                     image_id=_bl.get("pickup_mly_id", ""),
-                                     thumb_url=_bl.get("pickup_mly_thumb", "")),
-                    height=260,
-                )
-            with st.expander(f"📍 Dropoff — {_bl['to']}", expanded=True):
-                components.html(
-                    _mly_viewer_html(_bl["dropoff_lat"], _bl["dropoff_lon"],
-                                     image_id=_bl.get("dropoff_mly_id", ""),
-                                     thumb_url=_bl.get("dropoff_mly_thumb", "")),
-                    height=260,
-                )
+        st.session_state["_agent_booking_detail_legs"] = []   # clear stale detail
 
-        elif _bl["mode"] == "walk":
-            st.markdown(
-                f"### 🚶 Leg {_bl['leg_index']+1} — Walk"
-                f"  \n**{_bl['from']} → {_bl['to']}**"
-            )
-            _wc1, _wc2 = st.columns(2)
-            _wc1.metric("Distance", f"{_bl['dist_km']} km")
-            _wc2.metric("Walk time", f"{_bl['duration_min']} min")
-            st.info(
-                f"Only {_bl['dist_km']} km — no transport needed. "
-                f"Approximately {_bl['duration_min']} min on foot.",
-                icon="🚶",
-            )
-            with st.expander("📍 Street view at start", expanded=True):
-                components.html(
-                    _mly_viewer_html(_bl["pickup_lat"], _bl["pickup_lon"],
-                                     height=240,
-                                     image_id=_bl.get("pickup_mly_id", ""),
-                                     thumb_url=_bl.get("pickup_mly_thumb", "")),
-                    height=240,
-                )
+    _booking_display = st.session_state.get("_agent_booking_legs_display", [])
+    if _booking_display:
+        _render_quick_itinerary(_booking_display)
 
-        elif _bl["mode"] == "helicopter":
-            dep = _bl["departure_helipad"]
-            arr = _bl["arrival_helipad"]
-            st.markdown(
-                f"### 🚁 Leg {_bl['leg_index']+1} — Helicopter Flight"
-                f"  \n**{dep['name']} → {arr['name']}**  "
-                f"({_bl['dist_km']} km · {_bl['duration_min']} min)"
-            )
-            with st.expander(f"📋 Departure: {dep['name']} ({dep['ident'] or 'OSM'})", expanded=True):
-                _dep_badge = _metar_badge(_bl.get("metar_dep"))
-                if _dep_badge:
-                    st.markdown(_dep_badge, unsafe_allow_html=True)
-                _hc1, _hc2 = st.columns(2)
-                _hc1.markdown(
-                    f"**Status:** {dep.get('status','—')}  \n"
-                    f"**City:** {dep.get('servcity','—')}  \n"
-                    f"**Ownership:** {dep.get('ownership','—')}  \n"
-                    f"**Private use:** {'Yes' if dep.get('private_use') else 'No'}  \n"
-                    + (f"**Address:** {dep['address']}  \n" if dep.get('address') else "")
-                    + f"**Coordinates:** `{dep['lat']:.5f}, {dep['lon']:.5f}`"
-                )
-                _hc2.markdown(f"**Coordination note:**  \n{dep.get('contact_notes','—')}")
-                if dep.get("adip_url"):
-                    st.markdown(f"[📋 Open ADIP record]({dep['adip_url']})")
-                st.markdown(f"[📍 Google Maps ↗]({dep.get('gmaps_url','')})")
-                components.html(
-                    _mly_viewer_html(dep["lat"], dep["lon"],
-                                     image_id=dep.get("mly_image_id", ""),
-                                     thumb_url=dep.get("mly_thumb_url", "")),
-                    height=260,
-                )
-            with st.expander(f"📋 Arrival: {arr['name']} ({arr['ident'] or 'OSM'})", expanded=True):
-                _arr_badge = _metar_badge(_bl.get("metar_arr"))
-                if _arr_badge:
-                    st.markdown(_arr_badge, unsafe_allow_html=True)
-                _ac1, _ac2 = st.columns(2)
-                _ac1.markdown(
-                    f"**Status:** {arr.get('status','—')}  \n"
-                    f"**City:** {arr.get('servcity','—')}  \n"
-                    f"**Ownership:** {arr.get('ownership','—')}  \n"
-                    f"**Private use:** {'Yes' if arr.get('private_use') else 'No'}  \n"
-                    + (f"**Address:** {arr['address']}  \n" if arr.get('address') else "")
-                    + f"**Coordinates:** `{arr['lat']:.5f}, {arr['lon']:.5f}`"
-                )
-                _ac2.markdown(f"**Coordination note:**  \n{arr.get('contact_notes','—')}")
-                if arr.get("adip_url"):
-                    st.markdown(f"[📋 Open ADIP record]({arr['adip_url']})")
-                st.markdown(f"[📍 Google Maps ↗]({arr.get('gmaps_url','')})")
-                components.html(
-                    _mly_viewer_html(arr["lat"], arr["lon"],
-                                     image_id=arr.get("mly_image_id", ""),
-                                     thumb_url=arr.get("mly_thumb_url", "")),
-                    height=260,
-                )
+        with st.expander("📋 Detailed Itinerary", expanded=False):
+            _detail_legs = st.session_state.get("_agent_booking_detail_legs", [])
+            if not _detail_legs:
+                st.caption("⚠️ Fetches live METAR, helipad status & Mapillary imagery — may take 1-2 min.")
+                if st.button("🚀 Load detailed view", key="load_detail_btn"):
+                    with st.spinner("Fetching helipad status, live weather & street imagery…"):
+                        _adip_df_detail, _ = load_data()
+                        _route_for_detail  = st.session_state.get("_agent_last_route")
+                        _inner_route = (_route_for_detail or {}).get("route")
+                        if _inner_route:
+                            _detail_legs = run_booking(
+                                _inner_route, faa_adip_df=_adip_df_detail
+                            )
+                            st.session_state["_agent_booking_detail_legs"] = _detail_legs
+                        else:
+                            st.session_state["_agent_booking_detail_legs"] = _booking_display
+                            _detail_legs = _booking_display
+            if _detail_legs:
+                _render_detailed_itinerary(_detail_legs)
 
     # ── Example prompts (first load only) ─────────────────────────────────────
+    # _pending handles the rare case where a previous fragment rerun set the input
+    # but didn't process it (e.g. clear-conversation race). For button clicks we
+    # capture _user_input_direct immediately — no second rerun needed.
     _pending = st.session_state.pop("_agent_pending_input", None)
+    _user_input_direct = None
     if not st.session_state["agent_messages"] and not _pending:
         st.markdown("**Try one of these:**")
         _ex_cols = st.columns(3)
@@ -4884,16 +6056,20 @@ def _route_assistant_content() -> None:
         ]
         for _ei, (_ec, _ex) in enumerate(zip(_ex_cols, _examples)):
             if _ec.button(_ex, key=f"ex_{_ei}"):
-                st.session_state["_agent_pending_input"] = _ex
+                _user_input_direct = _ex
 
     # ── Chat input ────────────────────────────────────────────────────────────
     _user_input = (
-        st.chat_input("Route, nearby places, weather… ask anything about your trip") or _pending
+        st.chat_input("Route, nearby places, weather… ask anything about your trip")
+        or _pending
+        or _user_input_direct
     )
     if _user_input:
         st.session_state["agent_messages"].append({"role": "user", "content": _user_input})
-        # Clear persisted booking leg cards so stale details don't show during new request
+        # Clear persisted booking cards so stale details don't show during new request
         st.session_state["_agent_booking_legs"] = []
+        st.session_state["_agent_booking_legs_display"] = []
+        st.session_state["_agent_booking_detail_legs"] = []
         with st.chat_message("user"):
             st.markdown(_user_input)
 
@@ -4937,6 +6113,19 @@ def _route_assistant_content() -> None:
                     return f"{res.get('display_name', f'{lat:.4f}, {lon:.4f}')}"
                 return "done"
 
+            _last_rt = st.session_state.get("_agent_last_route") or {}
+            _location_hint = ""
+            _orig = _last_rt.get("origin") or {}
+            _dest = _last_rt.get("destination") or {}
+            if _orig.get("text"):
+                _location_hint = f"The user's last known origin is '{_orig['text']}'"
+                if _dest.get("text"):
+                    _location_hint += f" and destination is '{_dest['text']}'"
+                _location_hint += (
+                    ". Use the origin location as the default search area "
+                    "when the user asks about nearby places or weather without specifying a location."
+                )
+
             with st.status("Working…", expanded=True) as _agent_status:
                 def _on_agent_step(event: str, data: dict) -> None:
                     if event == "thinking":
@@ -4956,10 +6145,15 @@ def _route_assistant_content() -> None:
                     history=st.session_state["_agent_llm_history"],
                     faa_adip_df=_adip_df,
                     status_callback=_on_agent_step,
+                    location_hint=_location_hint,
                 )
                 _agent_status.update(label="Done", state="complete", expanded=False)
 
             _reply = _result.get("response") or ""
+
+            # Model warnings always shown (even alongside a valid response)
+            for _mw in _result.get("model_warnings", []):
+                st.warning(_mw)
 
             if _result.get("error"):
                 _err_msg = f"Sorry — {_result['error']}"
@@ -4980,6 +6174,14 @@ def _route_assistant_content() -> None:
                 # Always show the model's final narrative
                 if _reply:
                     st.markdown(_reply)
+
+                # ── Weather card (if get_weather tool was called) ─────────
+                if _result.get("weather") and not _result.get("route"):
+                    _render_weather_card(_result["weather"])
+
+                # ── Places card (if search_nearby_places tool was called) ──
+                if _result.get("places"):
+                    _render_places_card(_result["places"])
 
                 # ── Route display (if compute_route tool was called) ───────
                 _route = _result.get("route")
@@ -5124,6 +6326,8 @@ def _route_assistant_content() -> None:
             st.session_state["agent_messages"] = []
             st.session_state["_agent_llm_history"] = []
             st.session_state["_agent_booking_legs"] = []
+            st.session_state["_agent_booking_legs_display"] = []
+            st.session_state["_agent_booking_detail_legs"] = []
             st.session_state.pop("_agent_last_route", None)
             st.rerun()
 
