@@ -2334,10 +2334,16 @@ with tab_eda:
     # map by build_map().  The key change forces a full remount (new Folium
     # map at the correct location) on every jump so the injected JS always
     # fires on a fresh component instance.
+    _mm_cache_key = (_bk_ver, int(_use_satellite))
+    if st.session_state.get("_mm_key") != _mm_cache_key:
+        st.session_state["_mm_key"] = _mm_cache_key
+        st.session_state["_mm_obj"] = build_map(
+            faa, osm, True, True,
+            center=_bk_center, zoom=_bk_zoom,
+            use_satellite=_use_satellite,
+        )
     map_state = st_folium(
-        build_map(faa, osm, True, True,
-                  center=_bk_center, zoom=_bk_zoom,
-                  use_satellite=_use_satellite),
+        st.session_state["_mm_obj"],
         width="100%", height=530, returned_objects=[],
         key=f"main_map_{_bk_ver}",
     )
@@ -2848,10 +2854,11 @@ with tab_eda:
         "if(n>50)clearInterval(iv);},200);})();</script>"
     ))
 
+    st.session_state.setdefault("_dm_obj", dm)
     # ── render density map + KPI panel ───────────────────────────────────
     col_map, col_kpi = st.columns([3, 1])
     with col_map:
-        st_folium(dm, width=None, height=510, returned_objects=[], key="density_map")
+        st_folium(st.session_state["_dm_obj"], width=None, height=510, returned_objects=[], key="density_map")
     with col_kpi:
         st.metric("FAA helipads", f"{len(faa_v):,}")
         st.metric("OSM helipads", f"{len(osm_v):,}")
@@ -3004,7 +3011,8 @@ with tab_eda:
         "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
         "if(n>50)clearInterval(iv);},200);})();</script>"
     ))
-    st_folium(sm, width=None, height=480, returned_objects=[], key="hotspot_map")
+    st.session_state.setdefault("_sm_obj", sm)
+    st_folium(st.session_state["_sm_obj"], width=None, height=480, returned_objects=[], key="hotspot_map")
 
     hs_df = pd.DataFrame(hs_rows).set_index("Business Centre")
     st.dataframe(hs_df, use_container_width=True, height=490)
@@ -3151,7 +3159,8 @@ with tab_eda:
         "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
         "if(n>50)clearInterval(iv);},200);})();</script>"
     ))
-    st_folium(rm, width=None, height=460, returned_objects=[], key="res_spider_map")
+    st.session_state.setdefault("_rm_obj", rm)
+    st_folium(st.session_state["_rm_obj"], width=None, height=460, returned_objects=[], key="res_spider_map")
 
     res_df = pd.DataFrame(res_rows).set_index("Residence")
     st.dataframe(res_df, use_container_width=True, height=460)
@@ -4868,6 +4877,7 @@ _MIA_IMG   = ASSETS_DIR / "mia.png"
 _MIA_AUDIO = ASSETS_DIR / "mia_intro.mp3"
 
 
+@st.cache_data(show_spinner=False)
 def _build_mia_card() -> str:
     """Return a self-contained HTML card for the Mia intro panel.
 
