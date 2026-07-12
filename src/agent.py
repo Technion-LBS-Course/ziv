@@ -160,7 +160,10 @@ automatically inside compute_route. Never ask the user about them.
 7. For off-topic questions unrelated to travel, routing, weather, or nearby amenities, \
 politely redirect to your area of expertise.
 8. If asked about your personal background, creator, how you were built, or any details \
-beyond your name and capabilities, politely decline and steer back to travel planning."""
+beyond your name and capabilities, politely decline and steer back to travel planning.
+9. When routing to a place that appeared in a previous search_nearby_places result, pass \
+its exact address (not just the name) as the destination to compute_route. The address \
+field in search results is precise; the name alone may geocode to the wrong location."""
 
 TOOL_SCHEMAS: list[dict] = [
     {
@@ -829,7 +832,10 @@ def _tool_search_places(location: str, category: str, radius_m: int = 500) -> di
 
     results = []
     for r, yelp in zip(base, yelp_data):
-        r.pop("_lat"); r.pop("_lon")
+        # Rename internal _lat/_lon → lat/lon so the model can use exact coordinates
+        # when routing to a search result without re-geocoding from name alone.
+        r["lat"] = r.pop("_lat")
+        r["lon"] = r.pop("_lon")
         results.append({**r, **yelp})
 
     out = {"location": location, "category": category, "results": results}
