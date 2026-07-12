@@ -199,16 +199,20 @@ TOOL_SCHEMAS: list[dict] = [
                 "properties": {
                     "location": {
                         "type": "string",
-                        "description": "Location to search near, e.g. '30th St Heliport, NYC' or 'Westchester Airport'",
+                        "description": (
+                            "Specific location to search near, e.g. '30th St Heliport, NYC' "
+                            "or 'Westchester Airport'. "
+                            "NEVER pass 'nearby', 'near me', or 'here' — always resolve to "
+                            "a real place name. If the user said 'nearby' without a location, "
+                            "use the origin from the session context."
+                        ),
                     },
                     "category": {
                         "type": "string",
                         "description": (
-                            "Type of place. Use canonical terms for best results: "
-                            "'restaurant' (covers fine dining, bistro, etc.), 'hotel', "
-                            "'coffee', 'pharmacy', 'lounge', 'parking'. "
-                            "For cuisine-specific searches you may use: "
-                            "'sushi', 'italian', 'french', 'steakhouse', 'seafood'."
+                            "Type of place — use the CUISINE or PLACE TYPE only, not a full phrase. "
+                            "Good: 'italian', 'restaurant', 'hotel', 'coffee', 'sushi', 'french', 'seafood'. "
+                            "BAD: 'italian restaurant', 'fine dining restaurant' — drop the word 'restaurant'."
                         ),
                     },
                     "radius_m": {
@@ -722,9 +726,14 @@ def _yelp_enrich(name: str, lat: float, lon: float) -> dict:
         )
         resp.raise_for_status()
         biz = (resp.json().get("businesses") or [None])[0]
+        # Skip permanently closed businesses — their URL leads to a dead page
+        if biz and biz.get("is_closed", False):
+            biz = None
+        rating_raw = biz.get("rating") if biz else None
         out = (
             {
-                "rating":       biz.get("rating"),
+                # Treat rating=0 same as missing — 0.0 stars is a Yelp data artifact
+                "rating":       rating_raw if (rating_raw and rating_raw > 0) else None,
                 "review_count": biz.get("review_count"),
                 "price":        biz.get("price", ""),
                 "yelp_url":     biz.get("url", ""),
@@ -765,6 +774,12 @@ def _tool_search_places(location: str, category: str, radius_m: int = 500) -> di
 
     cat_lower = category.lower().strip()
     category_code = _TOMTOM_CATEGORY_MAP.get(cat_lower)
+    if category_code is None:
+        # Fallback: try each word so "italian restaurant" → "italian" → 7315003
+        for word in cat_lower.split():
+            if word in _TOMTOM_CATEGORY_MAP:
+                category_code = _TOMTOM_CATEGORY_MAP[word]
+                break
     url = (
         f"https://api.tomtom.com/search/2/poiSearch/"
         f"{_urlparse.quote(category)}.json"

@@ -5678,7 +5678,7 @@ def _render_places_card(data: dict) -> None:
         links      = ph_html + url_html + yelp_html
         links_row  = f'<div class="r-links">{links}</div>' if links else ""
         hours_row  = f'<div class="r-hours">🕐 {hours}</div>' if hours else ""
-        if rating is not None:
+        if rating is not None and rating > 0:
             stars_filled = int(rating)
             stars_half   = 1 if (rating - stars_filled) >= 0.5 else 0
             stars_empty  = 5 - stars_filled - stars_half
