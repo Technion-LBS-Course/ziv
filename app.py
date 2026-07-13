@@ -3548,13 +3548,9 @@ except AttributeError:
 @_fragment
 def _inspector_content() -> None:
     """Render the full Inspector tab — runs as an isolated fragment."""
-    insp_model = _load_inspector_model()
-    if insp_model is None:
-        st.warning(
-            f"YOLO weights not found at `{YOLO_MODEL_PATH}`. "
-            "Run training first or copy `models/helipad_yolov8s.pt` to the project root."
-        )
-        return
+    # YOLO model is loaded lazily inside each mode's inference block — NOT here.
+    # Loading it at fragment startup imports torch+ultralytics while cv2's libgomp
+    # is already loaded, causing a double-libgomp segfault on Streamlit Cloud.
 
     insp_mode = st.radio(
         "Mode",
@@ -3606,11 +3602,24 @@ def _inspector_content() -> None:
             # Auto-jump: run inference whenever the selection changes
             if opts_a and sel_opt and sel_opt != "(none)":
                 ident_a = sel_opt.split(" — ")[0]
-                if ident_a != st.session_state.get("_insp_a_ident"):
+                if "_insp_a_ident" not in st.session_state:
+                    # First render: seed location state without loading YOLO.
+                    # The chip loads on the first real selection change.
+                    row_a = cat_df[cat_df.ident == ident_a].iloc[0]
+                    st.session_state.update({
+                        "_insp_a_lat":    float(row_a.lat),
+                        "_insp_a_lon":    float(row_a.lon),
+                        "_insp_a_ver":    0,
+                        "_insp_a_ident":  ident_a,
+                        "_insp_a_chip":   None,
+                        "_insp_a_result": None,
+                    })
+                elif ident_a != st.session_state["_insp_a_ident"]:
+                    _m     = _load_inspector_model()
                     row_a  = cat_df[cat_df.ident == ident_a].iloc[0]
                     cp     = _TEST_IMG_DIR / f"{ident_a}.jpg"
                     chip_a = load_chip(cp) if cp.exists() else None
-                    res_a  = detect_yolo(chip_a, insp_model) if chip_a else {
+                    res_a  = detect_yolo(chip_a, _m) if (chip_a and _m) else {
                         "detected": False, "bbox_px": None, "cx": None, "cy": None,
                         "confidence": 0.0, "method": "yolo_finetuned", "latency_s": 0.0,
                     }
@@ -3836,18 +3845,19 @@ def _inspector_content() -> None:
             do_infer = force_b
 
             if do_infer:
+                _m = _load_inspector_model()
                 if imagery_b in ("NAIP only", "NAIP + ESRI"):
                     with st.spinner("Fetching NAIP chip…"):
                         cn = fetch_naip_chip(new_lat_b, new_lng_b)
-                    if cn:
-                        rn = detect_yolo(cn, insp_model)
+                    if cn and _m:
+                        rn = detect_yolo(cn, _m)
                         st.session_state["_insp_b_naip_chip"]   = cn
                         st.session_state["_insp_b_naip_result"] = rn
                 if imagery_b in ("ESRI only", "NAIP + ESRI"):
                     with st.spinner("Fetching ESRI chip…"):
                         ce = fetch_esri_chip(new_lat_b, new_lng_b)
-                    if ce:
-                        re = detect_yolo(ce, insp_model)
+                    if ce and _m:
+                        re = detect_yolo(ce, _m)
                         st.session_state["_insp_b_esri_chip"]   = ce
                         st.session_state["_insp_b_esri_result"] = re
                 st.session_state["_insp_b_inferred_at"] = (new_lat_b, new_lng_b)
@@ -3970,7 +3980,11 @@ def _inspector_content() -> None:
                     with st.spinner("Fetching NAIP chip…"):
                         _chip_c = fetch_naip_chip(lat_c, lon_c)
                     if _chip_c is not None:
-                        _res_c = detect_yolo(_chip_c, insp_model)
+                        _m_c = _load_inspector_model()
+                        _res_c = detect_yolo(_chip_c, _m_c) if _m_c else {
+                            "detected": False, "bbox_px": None, "cx": None, "cy": None,
+                            "confidence": 0.0, "method": "yolo_finetuned", "latency_s": 0.0,
+                        }
                         st.session_state["_insp_c_chip"]   = _chip_c
                         st.session_state["_insp_c_result"] = _res_c
                     else:
