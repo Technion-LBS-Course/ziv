@@ -5535,7 +5535,7 @@ def _nws_detail_to_metric(text: str) -> str:
     # range "X to Y mph" must be substituted before the single "X mph" pattern
     text = _re.sub(r"(\d+)\s+to\s+(\d+)\s*mph", _range_ms, text, flags=_re.IGNORECASE)
     text = _re.sub(r"(\d+)\s*mph", _mtoms, text)
-    text = _re.sub(r"((?:near|around|of)\s+)(\d+)(?=[\s,.])", _implicit, text)
+    text = _re.sub(r"((?:near|around|of)\s+)(\d+)(?=[\s,])", _implicit, text)
     return text
 
 
