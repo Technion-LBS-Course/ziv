@@ -10,6 +10,29 @@ Update this file at the end of every session before committing.
 
 ---
 
+## 2026-07-13 — Post-Final Bug Sprint: Cloud Stability (continued)
+
+**Commits:** `24b3777` → `ca7aef4`
+
+### Done
+
+**Recurring segfault after b427c73 CPU-wheel fix — root cause analysis from Streamlit Cloud logs:**
+
+Two compounding issues identified by reading the production build log:
+
+1. **Inspector fragment loaded YOLO model at startup** — `_inspector_content()` called `_load_inspector_model()` at the very top of the fragment body. Since `@st.experimental_fragment` runs on the initial page load (not just on user interaction), this imported torch+ultralytics while `cv2`'s libgomp was already loaded → double-libgomp race → SIGSEGV. The Ultralytics settings directory creation message in the log (`Creating new Ultralytics Settings v0.0.6 file`) confirmed torch was imported during the 2-minute startup window, not at module level.
+   - Fix: moved YOLO load out of the fragment top; now deferred to each mode's specific inference trigger: Mode A loads on first dropdown selection change; Modes B/C load on user-triggered inference (button click / map marker click). First render seeds `_insp_a_ident` etc. in session_state without running any inference.
+   - Commit: `ca7aef4` (`app.py`)
+
+2. **xgboost 2.1.x depends on `nvidia-nccl-cu12`** — `xgboost>=2.0.0,<2.2.0` resolved to 2.1.4, which pulls in the 303 MB `nvidia_nccl_cu12` CUDA collective-communications library. NCCL attempts CUDA initialization on import, which crashes on Streamlit Cloud's CPU-only VM.
+   - Fix: pinned `xgboost>=2.0.0,<2.1.0` (resolves to 2.0.3 which has no NCCL dep).
+   - Commit: `ca7aef4` (`requirements.txt`)
+
+**Context: why the previous lazy-import fix (24b3777) only partially helped:**
+- Commit 24b3777 removed the top-level `import torch` from `app.py` and moved `torch.classes.__path__=[]` inside `load_yolo_model()`. This stopped the immediate crash (first attempt: PID 803, crash right after deps install). But the fragment still eagerly called `_load_inspector_model()` on first page load → same libgomp race, just shifted 2 minutes into startup instead of at import time.
+
+---
+
 ## 2026-07-13 — Post-Final Bug Sprint: Cloud Stability, UX Fixes, Agent Memory
 
 **Commits:** `b427c73` → `212a161`
