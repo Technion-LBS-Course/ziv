@@ -226,6 +226,14 @@ def load_yolo_model(path: Path = YOLO_MODEL_PATH):
         FileNotFoundError: If weights file does not exist.
     """
     from ultralytics import YOLO
+    # Suppress Streamlit file-watcher log noise: "Tried to instantiate class
+    # '__path__._path'" when watcher inspects torch.classes.__path__.
+    # Must run after ultralytics (which imports torch) but before any predict().
+    try:
+        import torch as _torch
+        _torch.classes.__path__ = []  # type: ignore[assignment]
+    except Exception:
+        pass
     if not path.exists():
         raise FileNotFoundError(f"YOLO weights not found: {path}")
     model = YOLO(str(path))

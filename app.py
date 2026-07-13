@@ -27,17 +27,6 @@ try:
 except ImportError:
     pass  # python-dotenv not installed — keys must be set in the environment directly
 
-# Suppress "Tried to instantiate class '__path__._path'" log noise.
-# Streamlit's file-watcher inspects every sys.modules entry's __path__; when it
-# reaches torch.classes it triggers a C++ path object that cannot be instantiated
-# in Python.  Replacing __path__ with an empty list stops the inspection without
-# affecting any registered C++ classes (they are already loaded at this point).
-try:
-    import torch
-    torch.classes.__path__ = []  # type: ignore[assignment]
-except Exception:
-    pass
-
 import json
 import logging
 from pathlib import Path
