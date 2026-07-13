@@ -41,11 +41,25 @@ models/*.json
 # Auto-downloaded YOLO base weights at repo root (not our trained model)
 yolov8s*.pt
 yolov8m*.pt
-# Training run: duplicate weights and large diagnostic batch images
+# Training run: last checkpoints and diagnostic batch images (all helipad_run_* dirs)
+models/helipad_run*/weights/last.pt
+models/helipad_run*/train_batch*.jpg
+models/helipad_run*/val_batch*.jpg
+models/helipad_run*/labels.jpg
+# Legacy single-run patterns
 models/helipad_run/weights/
 models/helipad_run/train_batch*.jpg
 models/helipad_run/val_batch*.jpg
 models/helipad_run/labels.jpg
+# Preliminary / experimental model files
+models/helipad_yolov8s_preliminary.pt
+# Training bundle (intermediate packaging artifacts)
+training_bundle/
+# YOLO dataset alternative split directories (easy/hard neg, pos)
+data/yolo_dataset/images/easy_neg_train/
+data/yolo_dataset/images/hard_neg_train/
+data/yolo_dataset/images/pos_train/
+data/yolo_dataset/zero_shot_results.csv
 
 # Secrets
 .env

@@ -10,6 +10,64 @@ Update this file at the end of every session before committing.
 
 ---
 
+## 2026-07-13 — Post-Final Bug Sprint: Cloud Stability, UX Fixes, Agent Memory
+
+**Commits:** `b427c73` → `212a161`
+
+### Done
+
+**Streamlit Cloud segfault (torch CUDA stubs on CPU-only VM):**
+- Pinned `torch==2.4.1+cpu` + `torchvision==0.19.1+cpu` from `download.pytorch.org/whl/cpu` — PyPI torch 2.5.x includes CUDA stub libraries that segfault at import on Streamlit Cloud's CPU server
+- Added `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `NUMEXPR_NUM_THREADS=1`, `TOKENIZERS_PARALLELISM=false` in `app.py` before all imports to prevent double-libgomp race between torch and opencv
+
+**Weather card not showing on Cloud:**
+- Root cause: `if _result.get("weather") and not _result.get("route"):` — the 8B Groq fallback model (used on Cloud when 70B quota exhausted) calls both `get_weather` and `compute_route` for weather queries; the guard hid the card whenever a route was also present
+- Fix: removed `and not _result.get("route")` from the condition
+
+**NWS wind range not converted to metric:**
+- Root cause: `_mph_to_ms()` used `re.match()` anchored at start with `/([\d.]+)\s*mph/`; NWS returns ranges like `"3 to 13 mph SW"` where `"3"` is followed by `" to"`, not `" mph"` — match failed, raw string returned unchanged
+- Also `_nws_detail_to_metric()` only converted the last number before `mph` in `"3 to 13 mph"`, producing `"3 to 5.8 m/s"` instead of `"1.3 to 5.8 m/s"`
+- Fix: added range pattern `/([\d.]+)\s+to\s+([\d.]+)\s*mph/` to both functions; range sub runs before single-value sub
+
+**Booking confirmation ID mismatch:**
+- Root cause: LLM text got a random `"SKYxxxxxx"` from `simulate_rideshare()`; booking card independently computed `"SR-" + md5(origin+dest+total_min)[:6].upper()`
+- Fix: `confirm_booking` tool now computes the same deterministic hash as `_render_quick_itinerary()` and returns it as `confirmation_id`
+
+**QR code missing on Streamlit Cloud:**
+- Root cause: `assets/qr_github.png` was not committed to git (existed only locally)
+- Fix: generated and committed `assets/qr_github.png`; added `qrcode[pil]>=7.4.0` to `requirements.txt`; added dynamic generation fallback in `_render_quick_itinerary()` when the file is absent
+
+**ADIP link missing from routing card helipads:**
+- Root cause: `_basic()` in `build_quick_booking_legs()` already populated `adip_url` in the pad dict, but `_pad_links()` in `_render_quick_itinerary()` never read it
+- Fix: one-line addition to `_pad_links()` to emit `📋 ADIP` link for FAA helipads that have an IDENT
+
+**FAA helipad preference over OSM:**
+- Root cause: `find_nearest_helipad()` returned the geometrically closest helipad regardless of source; when an OSM helipad and FAA helipad describe the same physical pad, OSM was sometimes chosen, losing ADIP/METAR resolution
+- Fix: after finding the closest candidate, if it is OSM and an FAA/IDENT entry exists within 50 m, the FAA entry is preferred
+
+**POI search missing nearby restaurants (Willis Marine Center / Italian):**
+- Root cause 1: default `radius_m=500` physically excluded Piccolo Restaurant at 869 m before any category filter ran
+- Root cause 2: `categorySet=7315003` (Italian sub-category) is absent from most small local restaurant records in TomTom; generic restaurant category (7315) was needed
+- Fix: increased default radius to 1500 m, cap to 3000 m; added zero-result fallback that retries cuisine sub-category searches with `categorySet=7315` (parent restaurant) when the specific code returns nothing
+
+**Route memory across conversation turns:**
+- Root cause: `result["route"]` reset to `None` on every `run_agent_v2()` call; "book it" messages after weather/POI follow-ups had no cached route and either failed (empty geocode args) or recomputed unnecessarily
+- Fix 1 (Python): `run_agent_v2()` now accepts `last_route`, `last_origin`, `last_destination`; `app.py` passes these from `st.session_state["_agent_last_route"]`; `result{}` is pre-seeded, so `confirm_booking` skips geocoding and recompute entirely
+- Fix 2 (LLM): when a route exists, `location_hint` upgraded from neutral "last known origin/dest" to an explicit instruction — "call `confirm_booking(origin='X', destination='Y')` directly — do NOT call compute_route again" — targeting 8B model failures on Cloud
+
+**Test plan:**
+- Created `SkyRoute_Agent_Test_Plan.xlsx` — 9 tabs (A–I), 55 test cases covering routing nominal/boundary, booking flow, weather, POI search, off-topic guardrails, bad inputs, multi-turn context, unit conversions
+
+### Issues
+
+- Streamlit Cloud WebSocket shows "Connecting…" → "Running…" during Groq API calls (~10–30s): Groq blocks the Streamlit server thread; Cloud proxy (CloudFlare) times out the WebSocket. No code fix available without async refactor — documented as known Cloud latency behavior.
+
+### Resolved
+
+See individual fix descriptions above. All 8 bugs fixed and deployed in this session.
+
+---
+
 ## 2026-06-13 — M3 Final: 4-Model Comparison, Inspector Tab, Results Tab Polish
 
 ### Done
