@@ -6186,14 +6186,31 @@ def _route_assistant_content() -> None:
             _location_hint = ""
             _orig = _last_rt.get("origin") or {}
             _dest = _last_rt.get("destination") or {}
+            _last_route_obj = _last_rt.get("route")
             if _orig.get("text"):
-                _location_hint = f"The user's last known origin is '{_orig['text']}'"
-                if _dest.get("text"):
-                    _location_hint += f" and destination is '{_dest['text']}'"
-                _location_hint += (
-                    ". Use the origin location as the default search area "
-                    "when the user asks about nearby places or weather without specifying a location."
-                )
+                _o_txt = _orig["text"]
+                _d_txt = _dest.get("text", "")
+                if _last_route_obj and _d_txt:
+                    _total  = _last_route_obj.get("total_min", "?")
+                    _drive  = _last_route_obj.get("drive_only_min", "?")
+                    _saved  = _last_route_obj.get("time_saved_min", "?")
+                    _location_hint = (
+                        f"A multimodal route has already been computed: "
+                        f"'{_o_txt}' → '{_d_txt}' "
+                        f"({_total} min helicopter vs {_drive} min driving, saves {_saved} min). "
+                        f"IMPORTANT: If the user wants to book this trip, call "
+                        f"confirm_booking(origin='{_o_txt}', destination='{_d_txt}') directly — "
+                        f"do NOT call compute_route again. "
+                        f"Use '{_o_txt}' as the default area for nearby place or weather queries."
+                    )
+                else:
+                    _location_hint = f"The user's last known origin is '{_o_txt}'"
+                    if _d_txt:
+                        _location_hint += f" and destination is '{_d_txt}'"
+                    _location_hint += (
+                        ". Use the origin location as the default search area "
+                        "when the user asks about nearby places or weather without specifying a location."
+                    )
 
             with st.status("Working…", expanded=True) as _agent_status:
                 def _on_agent_step(event: str, data: dict) -> None:
@@ -6215,6 +6232,9 @@ def _route_assistant_content() -> None:
                     faa_adip_df=_adip_df,
                     status_callback=_on_agent_step,
                     location_hint=_location_hint,
+                    last_route=_last_route_obj,
+                    last_origin=_last_rt.get("origin"),
+                    last_destination=_last_rt.get("destination"),
                 )
                 _agent_status.update(label="Done", state="complete", expanded=False)
 

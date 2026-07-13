@@ -1256,26 +1256,29 @@ def _execute_tool(
             origin_text = args.get("origin", "")
             dest_text   = args.get("destination", "")
 
-            # Geocode both ends
-            origin_ll = geocode_place(origin_text)
-            dest_ll   = geocode_place(dest_text)
-            if origin_ll is None:
-                return {"error": f"Could not locate origin '{origin_text}'"}
-            if dest_ll is None:
-                return {"error": f"Could not locate destination '{dest_text}'"}
-
-            if not helipads:
-                return {"error": "No helipad data available — data files may not be loaded"}
-
-            # For confirm_booking: reuse already-computed route if available
+            # confirm_booking short-circuit: skip geocoding when a route is
+            # already cached from this turn or a previous turn (passed via
+            # last_route in run_agent_v2).  This is the common case where the
+            # user asks follow-up questions between planning and booking.
             if name == "confirm_booking" and result.get("route"):
                 route = result["route"]
-                # Inject real place names in case they were missing on the cached route
                 if result.get("origin", {}).get("text"):
                     route = {**route, "origin_name": result["origin"]["text"]}
                 if result.get("destination", {}).get("text"):
                     route = {**route, "dest_name": result["destination"]["text"]}
             else:
+                # Geocode both ends (only needed for compute_route or
+                # confirm_booking when no cached route is available)
+                origin_ll = geocode_place(origin_text)
+                dest_ll   = geocode_place(dest_text)
+                if origin_ll is None:
+                    return {"error": f"Could not locate origin '{origin_text}'"}
+                if dest_ll is None:
+                    return {"error": f"Could not locate destination '{dest_text}'"}
+
+                if not helipads:
+                    return {"error": "No helipad data available — data files may not be loaded"}
+
                 route = compute_skyroute(
                     origin_ll[0], origin_ll[1],
                     dest_ll[0], dest_ll[1],
@@ -1899,6 +1902,9 @@ def run_agent_v2(
     faa_adip_df=None,
     status_callback=None,
     location_hint: str = "",
+    last_route: dict | None = None,
+    last_origin: dict | None = None,
+    last_destination: dict | None = None,
 ) -> dict:
     """Tool-calling concierge: natural language → tool dispatch → response.
 
@@ -1930,7 +1936,9 @@ def run_agent_v2(
     """
     result: dict = {
         "response": None,
-        "route": None,
+        "route":       last_route,       # pre-seed from previous turn so confirm_booking
+        "origin":      last_origin,      # can skip geocoding + recompute
+        "destination": last_destination,
         "booking_legs": None,
         "error": None,
         "tfr_warnings": [],
