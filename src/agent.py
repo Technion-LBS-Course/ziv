@@ -217,7 +217,7 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                     "radius_m": {
                         "type": "integer",
-                        "description": "Search radius in metres (default 500, max 2000)",
+                        "description": "Search radius in metres (default 1500, max 3000). Use 2000–3000 for suburban or marina areas.",
                     },
                 },
                 "required": ["location", "category"],
@@ -747,18 +747,18 @@ def _yelp_enrich(name: str, lat: float, lon: float) -> dict:
     return out
 
 
-def _tool_search_places(location: str, category: str, radius_m: int = 500) -> dict:
+def _tool_search_places(location: str, category: str, radius_m: int = 1500) -> dict:
     """Search for POIs near a location using TomTom Search API.
 
     Args:
         location: Plain-English location name or address.
         category: Type of place, e.g. 'restaurant', 'hotel', 'coffee'.
-        radius_m: Search radius in metres (clamped to 2000).
+        radius_m: Search radius in metres (clamped to 3000).
 
     Returns:
         Dict with 'results' list or 'error' key.
     """
-    radius_m = min(int(radius_m), 2000)
+    radius_m = min(int(radius_m), 3000)
     poi_key = (location.lower().strip(), category.lower().strip(), radius_m)
     if poi_key in _poi_cache:
         return _poi_cache[poi_key]
@@ -797,6 +797,17 @@ def _tool_search_places(location: str, category: str, radius_m: int = 500) -> di
         return {"error": "Place search temporarily unavailable", "results": []}
 
     items = resp.json().get("results", [])
+    # Zero-result fallback: cuisine sub-categories (7315xxx) are often absent from
+    # small restaurant records in TomTom. Retry with the parent restaurant category
+    # (7315) so the keyword in the URL path still drives relevance ranking.
+    if not items and category_code and category_code != 7315 and str(category_code).startswith("7315"):
+        params_fb = {**params, "categorySet": 7315}
+        try:
+            resp_fb = requests.get(url, params=params_fb, timeout=8)
+            resp_fb.raise_for_status()
+            items = resp_fb.json().get("results", [])
+        except Exception:
+            pass
     if not items:
         out = {
             "results": [],
