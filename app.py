@@ -6223,7 +6223,7 @@ def _route_assistant_content() -> None:
                     st.markdown(_reply)
 
                 # ── Weather card (if get_weather tool was called) ─────────
-                if _result.get("weather") and not _result.get("route"):
+                if _result.get("weather"):
                     _render_weather_card(_result["weather"])
 
                 # ── Places card (if search_nearby_places tool was called) ──
