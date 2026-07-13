@@ -4,12 +4,20 @@ Run:
     streamlit run app.py
 """
 
-# Windows: numpy / PyTorch / XGBoost each ship libiomp5md.dll → OMP Error #15.
-# Must be set before any of those libraries are imported.
+# Native-library env guards — must be set before ANY import of torch / cv2 / sklearn.
+# KMP_DUPLICATE_LIB_OK: suppresses OMP Error #15 on Windows (multiple libiomp5md).
+# OMP/MKL/OPENBLAS thread limits: prevents the libgomp double-load segfault that
+# occurs on CPU-only servers (Streamlit Cloud) when torch + opencv each ship their
+# own OpenMP runtime and both initialise at import time.
 import base64
 import math
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 # Load .env BEFORE any os.getenv() calls so API keys are available.
 # .env is gitignored — never committed. See .env.example for required keys.
@@ -5480,6 +5488,32 @@ function toggleChip(el){{el.classList.toggle('big');el.style.cursor=el.classList
     components.html(html, height=est_h, scrolling=False)
 
 
+def _nws_detail_to_metric(text: str) -> str:
+    """Best-effort convert NWS detailedForecast text from imperial to metric.
+
+    Handles: explicit °F → °C, mph → m/s, bare temperatures after
+    "near / around / of" in the 0–120 °F plausible range.
+    """
+    import re as _re
+
+    def _ftoc(m: "re.Match") -> str:
+        return str(round((float(m.group(1)) - 32) * 5 / 9)) + "°C"
+
+    def _mtoms(m: "re.Match") -> str:
+        return str(round(float(m.group(1)) * 0.447, 1)) + " m/s"
+
+    def _implicit(m: "re.Match") -> str:
+        v = float(m.group(2))
+        if 0 <= v <= 120:   # plausible Fahrenheit range; skip if likely a distance
+            return m.group(1) + str(round((v - 32) * 5 / 9)) + "°C"
+        return m.group(0)
+
+    text = _re.sub(r"(\d+)\s*°F", _ftoc, text)
+    text = _re.sub(r"(\d+)\s*mph", _mtoms, text)
+    text = _re.sub(r"((?:near|around|of)\s+)(\d+)(?=[\s,.])", _implicit, text)
+    return text
+
+
 def _render_weather_card(data: dict) -> None:
     """Render a detailed weather forecast card via components.html."""
     import html as _html
@@ -5511,7 +5545,10 @@ def _render_weather_card(data: dict) -> None:
     disp_temp  = data.get("temperature_c" if metric else "temperature_f", "—")
     wind       = _esc(data.get("wind", "—"))
     prec       = data.get("precip_chance", 0)
-    detail     = _esc((data.get("detailed", "") or "")[:200])
+    _raw_detail = (data.get("detailed", "") or "")[:200]
+    if metric:
+        _raw_detail = _nws_detail_to_metric(_raw_detail)
+    detail      = _esc(_raw_detail)
     main_ico   = _icon(cond, True)
     cond_esc   = _esc(cond)
 
