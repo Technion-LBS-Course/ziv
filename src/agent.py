@@ -1365,13 +1365,19 @@ def _execute_tool(
             booking_legs = build_quick_booking_legs(route)
             result["booking_legs"] = booking_legs   # triggers app.py booking display
 
-            # Build a booking reference from the first rideshare leg
-            booking_ref = "SKY-CONFIRMED"
-            for bl in booking_legs:
-                rs = bl.get("rideshare", {})
-                if rs.get("booking_ref"):
-                    booking_ref = rs["booking_ref"]
-                    break
+            # Compute a deterministic booking reference that matches _render_quick_itinerary()
+            # formula: "SR-" + md5(origin_name + dest_name + total_min)[:6].upper()
+            import hashlib as _hashlib
+            def _bl_dur(bl):
+                if bl["mode"] == "helicopter": return bl.get("duration_min", 0)
+                if bl["mode"] == "rideshare":  return bl.get("rideshare", {}).get("duration_min", 0)
+                return bl.get("duration_min", 0)
+            _orig_name = booking_legs[0].get("from", "") if booking_legs else ""
+            _dest_name = booking_legs[-1].get("to", "")  if booking_legs else ""
+            _total_min = sum(_bl_dur(bl) for bl in booking_legs)
+            booking_ref = "SR-" + _hashlib.md5(
+                f"{_orig_name}{_dest_name}{_total_min}".encode()
+            ).hexdigest()[:6].upper()
 
             return {
                 "confirmation_id": booking_ref,
@@ -1415,19 +1421,32 @@ def find_nearest_helipad(lat: float, lon: float,
                          helipads: list[dict]) -> Optional[dict]:
     """Return the closest helipad dict (with added dist_km key) or None.
 
+    When an OSM helipad is geometrically closest but an FAA helipad exists
+    within 50 m, the FAA entry is returned instead (FAA data is authoritative
+    for ADIP lookups, METAR resolution, and IDENT-based coordination).
+
     Args:
         lat: Query latitude.
         lon: Query longitude.
         helipads: List of dicts each with 'lat', 'lon', 'name'.
     """
-    best: Optional[dict] = None
-    best_d = float("inf")
-    for pad in helipads:
-        d = _haversine_km(lat, lon, float(pad["lat"]), float(pad["lon"]))
-        if d < best_d:
-            best_d = d
-            best = {**pad, "dist_km": round(d, 2)}
-    return best
+    if not helipads:
+        return None
+    candidates = sorted(
+        [(_haversine_km(lat, lon, float(p["lat"]), float(p["lon"])), p) for p in helipads],
+        key=lambda x: x[0],
+    )
+    best_d, best_pad = candidates[0]
+    # If nearest is OSM, prefer any FAA within 50 m of the user (same physical pad)
+    _FAA_PREF_KM = 0.05
+    if best_pad.get("source") != "faa" and not best_pad.get("ident"):
+        for d, pad in candidates:
+            if d > best_d + _FAA_PREF_KM:
+                break
+            if pad.get("source") == "faa" or pad.get("ident"):
+                best_d, best_pad = d, pad
+                break
+    return {**best_pad, "dist_km": round(best_d, 2)}
 
 
 def compute_skyroute(

@@ -5199,11 +5199,12 @@ def _render_quick_itinerary(legs: list[dict]) -> None:
 
             def _pad_links(pad, lat_key="lat", lon_key="lon"):
                 plat, plon = pad.get("lat",""), pad.get("lon","")
-                gm  = pad.get("gmaps_url") or (f"https://maps.google.com/?q={plat},{plon}&z=18" if plat else "")
-                mid = pad.get("mly_image_id","")
-                ml  = (f"https://www.mapillary.com/app/?pKey={mid}" if mid
-                       else (f"https://www.mapillary.com/app/?lat={plat}&lng={plon}&z=17" if plat else ""))
-                return " &nbsp;·&nbsp; ".join(filter(None,[_a(gm,"📍 Maps"),_a(ml,"📷 Street")]))
+                gm   = pad.get("gmaps_url") or (f"https://maps.google.com/?q={plat},{plon}&z=18" if plat else "")
+                mid  = pad.get("mly_image_id","")
+                ml   = (f"https://www.mapillary.com/app/?pKey={mid}" if mid
+                        else (f"https://www.mapillary.com/app/?lat={plat}&lng={plon}&z=17" if plat else ""))
+                adip = pad.get("adip_url","")
+                return " &nbsp;·&nbsp; ".join(filter(None,[_a(gm,"📍 Maps"),_a(ml,"📷 Street"),_a(adip,"📋 ADIP")]))
 
             dep_thumb = _thumb(dep.get("ident","") or "", dep.get("osm_id","") or "",
                                dep.get("lat", 0), dep.get("lon", 0))
@@ -5278,10 +5279,24 @@ def _render_quick_itinerary(legs: list[dict]) -> None:
     for ic, wp in zip(icons_between, waypoints[1:]):
         flow_html += f'<span class="flow-ic">{ic}</span><span class="wp">{wp}</span>'
 
-    # Load real QR code PNG as base64 for embedding in iframe
+    # Load QR code PNG; generate dynamically if asset not on disk (Streamlit Cloud fallback)
     import base64 as _b64, pathlib as _pl
     _qr_path = _pl.Path(__file__).parent / "assets" / "qr_github.png"
-    _qr_b64 = _b64.b64encode(_qr_path.read_bytes()).decode() if _qr_path.exists() else ""
+    if _qr_path.exists():
+        _qr_b64 = _b64.b64encode(_qr_path.read_bytes()).decode()
+    else:
+        try:
+            import qrcode as _qrlib
+            from io import BytesIO as _BytesIO
+            _qr = _qrlib.QRCode(version=2, box_size=6, border=3)
+            _qr.add_data("https://github.com/Technion-LBS-Course/ziv/tree/main")
+            _qr.make(fit=True)
+            _qr_img = _qr.make_image(fill_color="black", back_color="white")
+            _qr_buf = _BytesIO()
+            _qr_img.save(_qr_buf, format="PNG")
+            _qr_b64 = _b64.b64encode(_qr_buf.getvalue()).decode()
+        except Exception:
+            _qr_b64 = ""
 
     # Accurate height: header(90) + info-bar(66) + footer(76) + main + chip-expand buffer(150).
     # Helicopter card min ~225px (chip 96px + dep/arr labels + padding).
