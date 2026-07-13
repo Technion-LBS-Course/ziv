@@ -5508,7 +5508,14 @@ def _nws_detail_to_metric(text: str) -> str:
             return m.group(1) + str(round((v - 32) * 5 / 9)) + "°C"
         return m.group(0)
 
+    def _range_ms(m: "re.Match") -> str:
+        lo = round(float(m.group(1)) * 0.44704, 1)
+        hi = round(float(m.group(2)) * 0.44704, 1)
+        return f"{lo} to {hi} m/s"
+
     text = _re.sub(r"(\d+)\s*°F", _ftoc, text)
+    # range "X to Y mph" must be substituted before the single "X mph" pattern
+    text = _re.sub(r"(\d+)\s+to\s+(\d+)\s*mph", _range_ms, text, flags=_re.IGNORECASE)
     text = _re.sub(r"(\d+)\s*mph", _mtoms, text)
     text = _re.sub(r"((?:near|around|of)\s+)(\d+)(?=[\s,.])", _implicit, text)
     return text

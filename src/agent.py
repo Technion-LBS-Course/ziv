@@ -871,6 +871,12 @@ def _tool_get_weather(location: str, units: str = "imperial") -> dict:
     import re as _re
 
     def _mph_to_ms(wind_str: str) -> str:
+        # NWS often returns a range: "3 to 13 mph SW"
+        m = _re.match(r"([\d.]+)\s+to\s+([\d.]+)\s*mph(.*)", wind_str, _re.IGNORECASE)
+        if m:
+            lo = round(float(m.group(1)) * 0.44704, 1)
+            hi = round(float(m.group(2)) * 0.44704, 1)
+            return f"{lo} to {hi} m/s{m.group(3)}"
         m = _re.match(r"([\d.]+)\s*mph(.*)", wind_str, _re.IGNORECASE)
         if not m:
             return wind_str
