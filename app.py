@@ -5157,9 +5157,14 @@ def _render_quick_itinerary(legs: list[dict]) -> None:
         vline = "" if is_last else '<div class="vline"></div>'
 
         if mode == "walk":
-            lat, lon = bl.get("pickup_lat",""), bl.get("pickup_lon","")
+            # Last leg → link to destination (dropoff); first leg → link to pickup (origin)
+            if is_last:
+                lat, lon = bl.get("dropoff_lat",""), bl.get("dropoff_lon","")
+                mly_id   = bl.get("dropoff_mly_id","")
+            else:
+                lat, lon = bl.get("pickup_lat",""), bl.get("pickup_lon","")
+                mly_id   = bl.get("pickup_mly_id","")
             maps_url = f"https://maps.google.com/?q={lat},{lon}&z=18" if lat else ""
-            mly_id   = bl.get("pickup_mly_id","")
             mly_url  = (f"https://www.mapillary.com/app/?pKey={mly_id}" if mly_id
                         else (f"https://www.mapillary.com/app/?lat={lat}&lng={lon}&z=17" if lat else ""))
             card = f"""
@@ -5171,9 +5176,14 @@ def _render_quick_itinerary(legs: list[dict]) -> None:
         elif mode == "rideshare":
             rs   = bl.get("rideshare", {})
             fare = rs.get("fare_range","")
-            lat, lon = bl.get("pickup_lat",""), bl.get("pickup_lon","")
+            # Last leg → link to destination (dropoff); first leg → link to pickup (origin)
+            if is_last:
+                lat, lon = bl.get("dropoff_lat",""), bl.get("dropoff_lon","")
+                mly_id   = bl.get("dropoff_mly_id","")
+            else:
+                lat, lon = bl.get("pickup_lat",""), bl.get("pickup_lon","")
+                mly_id   = bl.get("pickup_mly_id","")
             maps_url = f"https://maps.google.com/?q={lat},{lon}&z=18" if lat else ""
-            mly_id   = bl.get("pickup_mly_id","")
             mly_url  = (f"https://www.mapillary.com/app/?pKey={mly_id}" if mly_id
                         else (f"https://www.mapillary.com/app/?lat={lat}&lng={lon}&z=17" if lat else ""))
             pickup_lbl = bl.get("from","") if li == 0 else ""
