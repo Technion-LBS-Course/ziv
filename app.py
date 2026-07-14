@@ -88,7 +88,7 @@ def _get_metar_bbox(lat_min: float, lon_min: float, lat_max: float, lon_max: flo
         r = requests.get(
             "https://aviationweather.gov/api/data/metar",
             params={"bbox": f"{lat_min},{lon_min},{lat_max},{lon_max}", "format": "json"},
-            timeout=8,
+            timeout=4,
             headers={"User-Agent": "SkyRoute/1.0"},
         )
         r.raise_for_status()
@@ -2851,11 +2851,11 @@ with tab_eda:
         "if(n>50)clearInterval(iv);},200);})();</script>"
     ))
 
-    st.session_state.setdefault("_dm_obj", dm)
+    st.session_state["_dm_html"] = st.session_state.get("_dm_html") or dm.get_root().render()
     # ── render density map + KPI panel ───────────────────────────────────
     col_map, col_kpi = st.columns([3, 1])
     with col_map:
-        st_folium(st.session_state["_dm_obj"], width=None, height=510, returned_objects=[], key="density_map")
+        components.html(st.session_state["_dm_html"], height=510, scrolling=False)
     with col_kpi:
         st.metric("FAA helipads", f"{len(faa_v):,}")
         st.metric("OSM helipads", f"{len(osm_v):,}")
@@ -3008,8 +3008,8 @@ with tab_eda:
         "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
         "if(n>50)clearInterval(iv);},200);})();</script>"
     ))
-    st.session_state.setdefault("_sm_obj", sm)
-    st_folium(st.session_state["_sm_obj"], width=None, height=480, returned_objects=[], key="hotspot_map")
+    st.session_state["_sm_html"] = st.session_state.get("_sm_html") or sm.get_root().render()
+    components.html(st.session_state["_sm_html"], height=480, scrolling=False)
 
     hs_df = pd.DataFrame(hs_rows).set_index("Business Centre")
     st.dataframe(hs_df, use_container_width=True, height=490)
@@ -3156,8 +3156,8 @@ with tab_eda:
         "var s=m.getSize();if(s.x===0||s.y===0)m.invalidateSize(false);}}"
         "if(n>50)clearInterval(iv);},200);})();</script>"
     ))
-    st.session_state.setdefault("_rm_obj", rm)
-    st_folium(st.session_state["_rm_obj"], width=None, height=460, returned_objects=[], key="res_spider_map")
+    st.session_state["_rm_html"] = st.session_state.get("_rm_html") or rm.get_root().render()
+    components.html(st.session_state["_rm_html"], height=460, scrolling=False)
 
     res_df = pd.DataFrame(res_rows).set_index("Residence")
     st.dataframe(res_df, use_container_width=True, height=460)

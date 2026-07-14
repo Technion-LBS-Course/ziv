@@ -111,7 +111,7 @@ def fetch_active_tfrs() -> list[dict]:
                 "srsname":      "EPSG:4326",
             },
             headers={"Referer": "https://tfr.faa.gov/tfr3/"},
-            timeout=8,   # reduced from 20 — fail fast, use cache on timeout
+            timeout=3,   # reduced from 20 — fail fast, use cache on timeout
         )
         resp.raise_for_status()
         for feat in resp.json().get("features", []):
@@ -164,7 +164,7 @@ def fetch_active_tfrs() -> list[dict]:
                 "f":         "geojson",
                 "outSR":     "4326",
             },
-            timeout=8,
+            timeout=3,
         )
         resp.raise_for_status()
         for feat in resp.json().get("features", []):
