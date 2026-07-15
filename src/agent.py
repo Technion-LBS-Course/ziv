@@ -595,12 +595,25 @@ def _geocode_nominatim(place_name: str) -> Optional[tuple[float, float]]:
     return None
 
 
+def _geo_dist_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Haversine distance in km between two points."""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return R * 2 * math.asin(math.sqrt(a))
+
+
 def geocode_place(place_name: str) -> Optional[tuple[float, float]]:
     """Geocode a place name or address to (lat, lon).
 
     Pipeline:
       1. In-memory cache (session-scoped, avoids repeated HTTP for same place)
       2. Try TomTom (business names + addresses, best accuracy)
+         — If place_name has a geographic qualifier (comma), cross-check with
+           Nominatim.  When they disagree by > 3 km, Nominatim wins: TomTom's
+           Manhattan-centre bias can return Grand Central instead of, e.g.,
+           "Hoboken Terminal, New York" (which should resolve to Hoboken, NJ).
       3. If TomTom fails, strip business name via LLM then retry TomTom
       4. Fall back to Nominatim on the cleaned address
 
@@ -617,6 +630,20 @@ def geocode_place(place_name: str) -> Optional[tuple[float, float]]:
     # 1. Try TomTom directly
     result = _geocode_tomtom(place_name)
     if result:
+        # Cross-check with Nominatim when the query contains a geographic qualifier
+        # (e.g. "Hoboken Terminal, New York").  TomTom's NYC-centre proximity bias
+        # can match a Manhattan landmark instead of the named cross-state location.
+        if "," in place_name:
+            nom = _geocode_nominatim(place_name)
+            if nom and _geo_dist_km(result[0], result[1], nom[0], nom[1]) > 3.0:
+                log.info(
+                    "Geocode: TomTom/Nominatim disagree by %.1f km for '%s'; using Nominatim",
+                    _geo_dist_km(result[0], result[1], nom[0], nom[1]),
+                    place_name,
+                )
+                # Discard TomTom's rich cache (wrong POI name/address for the wrong location)
+                _geocode_rich_cache.pop(cache_key, None)
+                result = nom
         _geocode_cache[cache_key] = result
         return result
 
