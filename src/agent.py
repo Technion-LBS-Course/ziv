@@ -1449,7 +1449,7 @@ _SPEED_DRIVE_KMH = 25.0   # urban average
 _SPEED_WALK_KMH  = 5.0    # pedestrian average
 _ROAD_FACTOR     = 1.35   # haversine → road distance multiplier
 _MAX_RANGE_KM    = 555.0  # max helicopter range
-_WALK_THRESHOLD_KM = 1.0  # legs shorter than this (or <5 min walk at 5 km/h) become walking
+_WALK_THRESHOLD_KM = 0.8  # walk if < 0.8 km or < 10 min at 5 km/h; drive beyond that
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
