@@ -5043,6 +5043,7 @@ def _naip_chip_b64(ident: str, osm_id: str = "",
 
     chip_path = None
     bbox_from_csv: list | None = None
+    img_pil = None  # pre-loaded PIL image for live-fetch path
 
     if ident:
         _p = _TEST_IMG_DIR / f"{ident}.jpg"
@@ -5073,20 +5074,33 @@ def _naip_chip_b64(ident: str, osm_id: str = "",
             from src.hie import fetch_naip_chip as _fetch_naip
             _live = _fetch_naip(float(lat), float(lon))
             if _live is not None:
-                img = _live.convert("RGB")
-                img.thumbnail((280, 280), Image.LANCZOS)
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=85)
-                return _b64.b64encode(buf.getvalue()).decode()
+                img_pil = _live.convert("RGB")
         except Exception:
             pass
+
+    if chip_path is None and img_pil is None:
         return None
 
     try:
-        img = Image.open(chip_path).convert("RGB")
+        img = img_pil if img_pil is not None else Image.open(chip_path).convert("RGB")
+
         if bbox_from_csv:
+            # FAA test-set: use pre-computed bbox from inspector_results.csv
             draw = ImageDraw.Draw(img)
             draw.rectangle(bbox_from_csv, outline=(0, 255, 0), width=4)
+        elif not ident:
+            # OSM or live-fetch chip: run YOLO inline to get bbox
+            try:
+                _model = _load_inspector_model()
+                if _model:
+                    from src.hie import detect_yolo as _dy
+                    _res = _dy(img, _model)
+                    if _res.get("detected") and _res.get("bbox_px"):
+                        draw = ImageDraw.Draw(img)
+                        draw.rectangle(_res["bbox_px"], outline=(0, 255, 0), width=4)
+            except Exception:
+                pass
+
         img.thumbnail((280, 280), Image.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
