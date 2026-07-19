@@ -26,7 +26,7 @@ Beyond routing, the underlying infrastructure data is broken. Public helipad dat
 
 ## Target User
 
-**Persona:** Miles Urban, 44, VP of Business Development at a Manhattan-based financial services firm. Lives in Bronxville, NY. Travels 4–5 times per week across the New York metro area — Midtown Manhattan, JFK/EWR, Jersey City, Greenwich CT — for client meetings and board sessions. Every wasted hour is a billable hour lost; he holds a corporate Amex with no travel cap.
+**Persona:** Miles Urban, 44, VP at Bank of America managing high-profile clients across the East Coast. Lives at 33 E Potter Ln NE, Halesite, NY 11743. Office: Newport Office Tower, 525 Washington Blvd, Jersey City, NJ 07310. Travels 4–5 times per week across the New York metro area — Jersey City, Midtown Manhattan, JFK/EWR, Greenwich CT — for client meetings and board sessions. Every wasted hour is a billable hour lost; he holds a corporate Amex with no travel cap.
 
 > *"I don't need cheaper. I need faster and reliable."*
 
