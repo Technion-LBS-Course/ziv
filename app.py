@@ -6035,7 +6035,7 @@ def _route_assistant_content() -> None:
 [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"])
     [data-testid="stMarkdownContainer"] li {
     font-size: 18px !important;
-    color: #f0f9ff !important;
+    color: #0369a1 !important;
     font-weight: 500 !important;
     line-height: 1.8 !important;
 }
