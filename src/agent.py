@@ -179,7 +179,7 @@ TOOL_SCHEMAS: list[dict] = [
                 "properties": {
                     "address": {
                         "type": "string",
-                        "description": "Place name or street address, e.g. '30th St Heliport' or '272 Park Ave, New York'",
+                        "description": "Place name or street address — always include city/state for transit hubs, e.g. 'Hoboken Terminal, New Jersey' not 'Hoboken Terminal'. Other examples: '30th St Heliport, New York' or '272 Park Ave, New York'",
                     }
                 },
                 "required": ["address"],
@@ -266,11 +266,11 @@ TOOL_SCHEMAS: list[dict] = [
                 "properties": {
                     "origin": {
                         "type": "string",
-                        "description": "Starting location",
+                        "description": "Starting location — always include city/state for transit hubs, e.g. 'Hoboken Terminal, New Jersey' not 'Hoboken Terminal'",
                     },
                     "destination": {
                         "type": "string",
-                        "description": "Destination location",
+                        "description": "Destination location — always include city/state for transit hubs, e.g. 'Hoboken Terminal, New Jersey' not 'Hoboken Terminal'",
                     },
                 },
                 "required": ["origin", "destination"],
@@ -291,11 +291,11 @@ TOOL_SCHEMAS: list[dict] = [
                 "properties": {
                     "origin": {
                         "type": "string",
-                        "description": "Starting location (same as compute_route origin)",
+                        "description": "Starting location — always include city/state for transit hubs, e.g. 'Hoboken Terminal, New Jersey' not 'Hoboken Terminal'",
                     },
                     "destination": {
                         "type": "string",
-                        "description": "Destination location",
+                        "description": "Destination location — always include city/state for transit hubs, e.g. 'Hoboken Terminal, New Jersey' not 'Hoboken Terminal'",
                     },
                 },
                 "required": ["origin", "destination"],
@@ -630,20 +630,20 @@ def geocode_place(place_name: str) -> Optional[tuple[float, float]]:
     # 1. Try TomTom directly
     result = _geocode_tomtom(place_name)
     if result:
-        # Cross-check with Nominatim when the query contains a geographic qualifier
-        # (e.g. "Hoboken Terminal, New York").  TomTom's NYC-centre proximity bias
-        # can match a Manhattan landmark instead of the named cross-state location.
-        if "," in place_name:
-            nom = _geocode_nominatim(place_name)
-            if nom and _geo_dist_km(result[0], result[1], nom[0], nom[1]) > 3.0:
-                log.info(
-                    "Geocode: TomTom/Nominatim disagree by %.1f km for '%s'; using Nominatim",
-                    _geo_dist_km(result[0], result[1], nom[0], nom[1]),
-                    place_name,
-                )
-                # Discard TomTom's rich cache (wrong POI name/address for the wrong location)
-                _geocode_rich_cache.pop(cache_key, None)
-                result = nom
+        # Always cross-check TomTom with Nominatim.  TomTom's NYC-centre proximity
+        # bias (lat=40.75, lon=-73.98) can return a Manhattan landmark instead of
+        # the correct cross-state location even when the state is absent from the
+        # query (e.g. the LLM passes "Hoboken Terminal" without ", New Jersey").
+        nom = _geocode_nominatim(place_name)
+        if nom and _geo_dist_km(result[0], result[1], nom[0], nom[1]) > 3.0:
+            log.info(
+                "Geocode: TomTom/Nominatim disagree by %.1f km for '%s'; using Nominatim",
+                _geo_dist_km(result[0], result[1], nom[0], nom[1]),
+                place_name,
+            )
+            # Discard TomTom's rich cache (wrong POI name/address for the wrong location)
+            _geocode_rich_cache.pop(cache_key, None)
+            result = nom
         _geocode_cache[cache_key] = result
         return result
 
