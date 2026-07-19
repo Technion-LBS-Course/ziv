@@ -5206,11 +5206,21 @@ def _render_quick_itinerary(legs: list[dict]) -> None:
             sub = (f'📍 Pick-up: {_esc(pickup_lbl)}' if pickup_lbl
                    else f'📍 Drop-off: {_esc(dropoff_lbl)}')
             fare_html = f'<span class="fare-badge">{_esc(fare)}</span>' if fare else ""
+            _rs_uber  = rs.get("uber_deeplink", "")
+            _rs_waymo = rs.get("waymo_url", "")
+            _rs_ref   = rs.get("booking_ref", "")
+            _ride_links = list(filter(None, [
+                _a(maps_url, "📍 Maps"),
+                _a(mly_url, "📷 Street"),
+                _a(_rs_uber,  "📱 Uber"),
+                _a(_rs_waymo, "🚗 Waymo"),
+            ]))
             card = f"""
               <div class="mode-lbl-row"><span class="mode-lbl">CAR</span>{fare_html}</div>
               <div class="leg-route">{_esc(bl.get('from',''))} → {_esc(bl.get('to',''))}</div>
               <div class="leg-sub">{sub}</div>
-              <div class="leg-links">{" &nbsp;·&nbsp; ".join(filter(None,[_a(maps_url,"📍 Maps"),_a(mly_url,"📷 Street")]))}</div>"""
+              {f'<div class="leg-sub" style="font-size:11px;opacity:.75">🔖 Ref: <b>{_esc(_rs_ref)}</b></div>' if _rs_ref else ''}
+              <div class="leg-links">{" &nbsp;·&nbsp; ".join(_ride_links)}</div>"""
 
         elif mode == "helicopter":
             dep = bl["departure_helipad"]
@@ -6016,6 +6026,19 @@ def _route_assistant_content() -> None:
     rebuilding the EDA maps, hotspot maps, and routing simulator HTML.
     """
     components.html(_build_mia_card(), height=282, scrolling=False)
+
+    # ── Mia response styling — larger text, distinct colour ───────────────────
+    st.markdown("""
+<style>
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"])
+    [data-testid="stMarkdownContainer"] p,
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"])
+    [data-testid="stMarkdownContainer"] li {
+    font-size: 16px !important;
+    color: #7dd3fc !important;
+    line-height: 1.75 !important;
+}
+</style>""", unsafe_allow_html=True)
 
     # ── Helipad pool + FAA ADIP data ──────────────────────────────────────────
     if "_agent_helipads" not in st.session_state:
